@@ -478,6 +478,9 @@ def complex(real, imag, name=None):
 
   Returns:
     A `Tensor` of type `complex64` or `complex128`.
+
+  Raises: 
+    TypeError: Real and imag must be correct types
   """
   real = ops.convert_to_tensor(real, name="real")
   imag = ops.convert_to_tensor(imag, name="imag")
@@ -591,6 +594,7 @@ def angle(input, name=None):
     A `Tensor` of type `float32` or `float64`.
   """
   with ops.name_scope(name, "Angle", [input]) as name:
+    input = ops.convert_to_tensor(input, name="input")
     if input.dtype.is_complex:
       return gen_math_ops.angle(input, Tout=input.dtype.real_dtype, name=name)
     else:
@@ -640,7 +644,7 @@ def cast(x, dtype, name=None):
 
   ```python
   x = tf.constant([1.8, 2.2], dtype=tf.float32)
-  tf.cast(x, tf.int32)  # [1, 2], dtype=tf.int32
+  tf.dtypes.cast(x, tf.int32)  # [1, 2], dtype=tf.int32
   ```
 
   The operation supports data types (for `x` and `dtype`) of
@@ -1173,6 +1177,17 @@ truncatemod = gen_math_ops.truncate_mod
 floormod = gen_math_ops.floor_mod
 
 
+def _add_dispatch(x, y, name=None):
+  """Dispatches to add for strings and add_v2 for all other types."""
+  if fwd_compat.forward_compatible(2019, 6, 25):
+    if x.dtype == dtypes.string:
+      return gen_math_ops.add(x, y, name=name)
+    else:
+      return gen_math_ops.add_v2(x, y, name=name)
+  else:
+    return gen_math_ops.add(x, y, name=name)
+
+
 def _mul_dispatch(x, y, name=None):
   """Dispatches cwise mul for "Dense*Dense" and "Dense*Sparse"."""
   is_tensor_y = isinstance(y, ops.Tensor)
@@ -1195,7 +1210,7 @@ _OverrideBinaryOperatorHelper(_sparse_dense_truediv, "truediv",
 _OverrideBinaryOperatorHelper(gen_sparse_ops.sparse_dense_cwise_mul, "mul",
                               sparse_tensor.SparseTensor)
 
-_OverrideBinaryOperatorHelper(gen_math_ops.add, "add")
+_OverrideBinaryOperatorHelper(_add_dispatch, "add")
 _OverrideBinaryOperatorHelper(gen_math_ops.sub, "sub")
 _OverrideBinaryOperatorHelper(_mul_dispatch, "mul")
 _OverrideBinaryOperatorHelper(_div_python2, "div")
@@ -2414,6 +2429,7 @@ def reduce_logsumexp(input_tensor, axis=None, keepdims=False, name=None):
 
 @tf_export("linalg.trace", v1=["linalg.trace", "trace"])
 @deprecation.deprecated_endpoints("trace")
+@dispatch.add_dispatch_support
 def trace(x, name=None):
   """Compute the trace of a tensor `x`.
 
@@ -3034,6 +3050,26 @@ def bincount(arr,
   value in `weights` at each index where the corresponding value in `arr` is
   `i`.
 
+  ```python
+  values = tf.constant([1,1,2,3,2,4,4,5])
+  tf.math.bincount(values) #[0 2 2 1 2 1]
+  ```
+  Vector length = Maximum element in vector `values` is 5. Adding 1, which is 6
+                  will be the vector length.
+
+  Each bin value in the output indicates number of occurrences of the particular
+  index. Here, index 1 in output has a value 2. This indicates value 1 occurs
+  two times in `values`.
+
+  ```python
+  values = tf.constant([1,1,2,3,2,4,4,5])
+  weights = tf.constant([1,5,0,1,0,5,4,5])
+  tf.math.bincount(values, weights=weights) #[0 6 0 1 9 5]
+  ```
+  Bin will be incremented by the corresponding weight instead of 1.
+  Here, index 1 in output has a value 6. This is the summation of weights
+  corresponding to the value in `values`.
+
   Args:
     arr: An int32 tensor of non-negative values.
     weights: If non-None, must be the same shape as arr. For each value in
@@ -3049,6 +3085,10 @@ def bincount(arr,
   Returns:
     A vector with the same dtype as `weights` or the given `dtype`. The bin
     values.
+
+  Raises:
+    `InvalidArgumentError` if negative values are provided as an input.
+
   """
   name = "bincount" if name is None else name
   with ops.name_scope(name):

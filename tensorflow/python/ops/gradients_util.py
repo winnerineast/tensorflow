@@ -21,7 +21,7 @@ from __future__ import print_function
 import collections
 import contextlib
 
-from six.moves import xrange  # pylint: disable=redefined-builtin
+from six.moves import xrange, zip  # pylint: disable=redefined-builtin
 
 from tensorflow.core.framework import attr_value_pb2
 from tensorflow.python.eager import backprop
@@ -34,7 +34,9 @@ from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework.func_graph import FuncGraph
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import control_flow_state
 from tensorflow.python.ops import control_flow_util
+from tensorflow.python.ops import default_gradient
 from tensorflow.python.ops import functional_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import resource_variable_ops
@@ -115,7 +117,7 @@ def _PendingCount(to_ops, from_ops, colocate_gradients_with_ops, func_graphs,
   # between from_ops and to_ops
 
   # 'loop_state' is None if there are no while loops.
-  loop_state = control_flow_ops.MaybeCreateControlFlowState(
+  loop_state = control_flow_state.MaybeCreateControlFlowState(
       between_op_list, between_ops, colocate_gradients_with_ops)
 
   # Initialize pending count for between ops.
@@ -158,9 +160,7 @@ def _DefaultGradYs(grad_ys,
     raise ValueError("Passed %d grad_ys for %d ys" % (len(grad_ys), len(ys)))
   grad_ys = ops.convert_n_to_tensor_or_indexed_slices(grad_ys, name="grad_y")
   new_grad_ys = []
-  for i in xrange(len(grad_ys)):
-    grad_y = grad_ys[i]
-    y = ys[i]
+  for i, (y, grad_y) in enumerate(zip(ys, grad_ys)):
     with _maybe_colocate_with(y.op, gradient_uid, colocate_gradients_with_ops):
       if grad_y is None:
         if y.dtype.is_complex:
@@ -663,7 +663,7 @@ def _GradientsHelper(ys,
               if loop_state:
                 out_grads[i] = loop_state.ZerosLike(op, i)
               else:
-                out_grads[i] = control_flow_ops.ZerosLikeOutsideLoop(op, i)
+                out_grads[i] = control_flow_state.ZerosLikeOutsideLoop(op, i)
           with ops.name_scope(op.name + "_grad"):
             # pylint: disable=protected-access
             with src_graph._original_op(op):
@@ -793,7 +793,7 @@ def _GetGrad(grads, t, unconnected_gradients):
   op_grads = grads.get(op)
   if not op_grads:
     if unconnected_gradients == UnconnectedGradients.ZERO:
-      t_dtype = t.dtype if t.dtype != dtypes.resource else dtypes.float32
+      t_dtype = default_gradient.get_zeros_dtype(t)
       return array_ops.zeros_like(t, dtype=t_dtype)
     elif unconnected_gradients == UnconnectedGradients.NONE:
       return None
@@ -881,23 +881,23 @@ class AggregationMethod(object):
   aggregating gradients:
 
   *  `ADD_N`: All of the gradient terms are summed as part of one
-     operation using the "AddN" op (see `tf.add_n`). This 
-     method has the property that all gradients must be ready and 
+     operation using the "AddN" op (see `tf.add_n`). This
+     method has the property that all gradients must be ready and
      buffered separately in memory before any aggregation is performed.
   *  `DEFAULT`: The system-chosen default aggregation method.
 
-  The following aggregation methods are experimental and may not 
+  The following aggregation methods are experimental and may not
   be supported in future releases:
 
   * `EXPERIMENTAL_TREE`: Gradient terms are summed in pairs using
-    using the "AddN" op. This method of summing gradients may reduce 
-    performance, but it can improve memory utilization because the 
+    using the "AddN" op. This method of summing gradients may reduce
+    performance, but it can improve memory utilization because the
     gradients can be released earlier.
 
   * `EXPERIMENTAL_ACCUMULATE_N`: Gradient terms are summed using the
-    "AccumulateN" op (see `tf.accumulate_n`), which accumulates the 
+    "AccumulateN" op (see `tf.accumulate_n`), which accumulates the
     overall sum in a single buffer that is shared across threads.
-    This method of summing gradients can result in a lower memory footprint 
+    This method of summing gradients can result in a lower memory footprint
     and lower latency at the expense of higher CPU/GPU utilization.
     For gradients of types that "AccumulateN" does not support, this
     summation method falls back on the behavior of `EXPERIMENTAL_TREE`

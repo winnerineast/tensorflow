@@ -316,6 +316,11 @@ class MklLayoutRewritePass : public GraphOptimizationPass {
         "QuantizedConv2DWithBiasSumAndReluAndRequantize";
     csinfo_.quant_conv2d_with_bias_signed_sum_and_relu_and_requantize =
         "QuantizedConv2DWithBiasSignedSumAndReluAndRequantize";
+    csinfo_.quantized_matmul_with_bias = "QuantizedMatMulWithBias";
+    csinfo_.quantized_matmul_with_bias_and_relu =
+        "QuantizedMatMulWithBiasAndRelu";
+    csinfo_.quantized_matmul_with_bias_and_relu_and_requantize =
+        "QuantizedMatMulWithBiasAndReluAndRequantize";
     csinfo_.quantized_depthwise_conv2d = "QuantizedDepthwiseConv2D";
     csinfo_.quantized_depthwise_conv2d_with_bias =
         "QuantizedDepthwiseConv2DWithBias";
@@ -519,6 +524,19 @@ class MklLayoutRewritePass : public GraphOptimizationPass {
              csinfo_.quant_conv2d_with_bias_signed_sum_and_relu_and_requantize),
          CopyAttrsQuantizedConv2D, AlwaysRewrite});
     rinfo_.push_back(
+        {csinfo_.quantized_matmul_with_bias,
+         mkl_op_registry::GetMklOpName(csinfo_.quantized_matmul_with_bias),
+         CopyAttrsQuantizedMatMulWithBias, AlwaysRewrite});
+    rinfo_.push_back({csinfo_.quantized_matmul_with_bias_and_relu,
+                      mkl_op_registry::GetMklOpName(
+                          csinfo_.quantized_matmul_with_bias_and_relu),
+                      CopyAttrsQuantizedMatMulWithBias, AlwaysRewrite});
+    rinfo_.push_back(
+        {csinfo_.quantized_matmul_with_bias_and_relu_and_requantize,
+         mkl_op_registry::GetMklOpName(
+             csinfo_.quantized_matmul_with_bias_and_relu_and_requantize),
+         CopyAttrsQuantizedMatMulWithBias, AlwaysRewrite});
+    rinfo_.push_back(
         {csinfo_.quantized_depthwise_conv2d,
          mkl_op_registry::GetMklOpName(csinfo_.quantized_depthwise_conv2d),
          CopyAttrsQuantizedConv2D, AlwaysRewrite});
@@ -631,6 +649,31 @@ class MklLayoutRewritePass : public GraphOptimizationPass {
          {CheckForTransposeToNHWC, CheckForConv2dOp, CheckForTransposeToNCHW},
          // CheckForMklOp
          FuseConv2D,
+         CopyAttrsConv});
+
+    // Transpose + Conv3d + Transpose:
+    std::vector<int> transpose_to_ndhwc = {NCDHW::dim::N, NCDHW::dim::D,
+                                           NCDHW::dim::H, NCDHW::dim::W,
+                                           NCDHW::dim::C};
+    std::vector<int> transpose_to_ncdhw = {NDHWC::dim::N, NDHWC::dim::C,
+                                           NDHWC::dim::D, NDHWC::dim::H,
+                                           NDHWC::dim::W};
+
+    auto CheckForTransposeToNDHWC =
+        std::bind(CheckForTranspose, std::placeholders::_1, transpose_to_ndhwc);
+    auto CheckForConv3dOp =
+        std::bind(CheckForMklOp, std::placeholders::_1, csinfo_.conv3d);
+    auto CheckForTransposeToNCDHW =
+        std::bind(CheckForTranspose, std::placeholders::_1, transpose_to_ncdhw);
+    auto FuseConv3D =
+        std::bind(FuseTransposeMklOpTranspose, std::placeholders::_1,
+                  std::placeholders::_2, std::placeholders::_3, "NCDHW");
+
+    finfo_.push_back(
+        {"transpose-elimination for Conv3D",
+         {CheckForTransposeToNDHWC, CheckForConv3dOp, CheckForTransposeToNCDHW},
+         // CheckForMklOp
+         FuseConv3D,
          CopyAttrsConv});
   }
 
@@ -789,6 +832,9 @@ class MklLayoutRewritePass : public GraphOptimizationPass {
     string quantized_conv2d_with_bias_sum_and_relu;
     string quantized_conv2d_with_bias_sum_and_relu_and_requantize;
     string quant_conv2d_with_bias_signed_sum_and_relu_and_requantize;
+    string quantized_matmul_with_bias;
+    string quantized_matmul_with_bias_and_relu;
+    string quantized_matmul_with_bias_and_relu_and_requantize;
     string quantized_depthwise_conv2d;
     string quantized_depthwise_conv2d_with_bias;
     string quantized_depthwise_conv2d_with_bias_and_relu;
@@ -1409,7 +1455,11 @@ class MklLayoutRewritePass : public GraphOptimizationPass {
     TF_CHECK_OK(GetNodeAttr(n->def(), "fused_ops", &fused_ops));
     return (fused_ops == std::vector<string>{"BiasAdd"} ||
             fused_ops == std::vector<string>{"Relu"} ||
+            fused_ops == std::vector<string>{"Relu6"} ||
+            fused_ops == std::vector<string>{"Elu"} ||
             fused_ops == std::vector<string>{"BiasAdd", "Relu"} ||
+            fused_ops == std::vector<string>{"BiasAdd", "Relu6"} ||
+            fused_ops == std::vector<string>{"BiasAdd", "Elu"} ||
             fused_ops == std::vector<string>{"BiasAdd", "Add"} ||
             fused_ops == std::vector<string>{"BiasAdd", "Add", "Relu"});
   }
@@ -1626,6 +1676,10 @@ class MklLayoutRewritePass : public GraphOptimizationPass {
                                   const std::vector<int32>& strides,
                                   const std::vector<int32>& dilations,
                                   bool change_format = false);
+
+  static void CopyAttrsQuantizedMatMulWithBias(const Node* orig_node,
+                                               NodeBuilder* nb,
+                                               bool change_format = false);
 
   // Generate a graph node in graph 'g' representing a dummy Mkl tensor node,
   // using node for original node 'orig_node' and return it in '*out'.
@@ -1963,6 +2017,9 @@ Status MklLayoutRewritePass::SetUpInputs(
       "QuantizedConv2DWithBiasAndReluAndRequantize",
       "QuantizedConv2DWithBiasSumAndReluAndRequantize",
       "QuantizedConv2DWithBiasSignedSumAndReluAndRequantize",
+      "QuantizedMatMulWithBias",
+      "QuantizedMatMulWithBiasAndRelu",
+      "QuantizedMatMulWithBiasAndReluAndRequantize",
       "QuantizedDepthwiseConv2D",
       "QuantizedDepthwiseConv2DWithBias",
       "QuantizedDepthwiseConv2DWithBiasAndRelu",
@@ -2548,6 +2605,27 @@ void MklLayoutRewritePass::CopyAttrsQuantizedConv2D(const Node* orig_node,
   }
 
   // Requantization attr Tbias.
+  DataType Tbias;
+  Status bias_status = GetNodeAttr(orig_node->def(), "Tbias", &Tbias);
+  if (bias_status.ToString() == "OK") nb->Attr("Tbias", Tbias);
+}
+
+void MklLayoutRewritePass::CopyAttrsQuantizedMatMulWithBias(
+    const Node* orig_node, NodeBuilder* nb, bool change_format) {
+  DataType T1, T2, Toutput;
+
+  // Get all attributes from old node.
+  TF_CHECK_OK(GetNodeAttr(orig_node->def(), "T1", &T1));
+  TF_CHECK_OK(GetNodeAttr(orig_node->def(), "T2", &T2));
+  TF_CHECK_OK(GetNodeAttr(orig_node->def(), "Toutput", &Toutput));
+
+  // Add attributes to new node.
+  nb->Attr("T1", T1);
+  nb->Attr("T2", T2);
+  nb->Attr("Toutput", Toutput);
+  nb->Attr("T", Toutput);  // added "T" for facilitating MklToTf conversion.
+
+  // Requantization attr Tbias
   DataType Tbias;
   Status bias_status = GetNodeAttr(orig_node->def(), "Tbias", &Tbias);
   if (bias_status.ToString() == "OK") nb->Attr("Tbias", Tbias);
@@ -3374,19 +3452,25 @@ Status MklLayoutRewritePass::RewriteNode(std::unique_ptr<Graph>* g,
 // Current implementation reflects only QuantizedConv2D and its fused Ops.
 const MklLayoutRewritePass::RewriteInfo*
 MklLayoutRewritePass::CheckForQuantizedNodeRewrite(const Node* n) const {
+  DataType T1, T2;
   DataType Tinput, Tfilter;
-  if (!(GetNodeAttr(n->def(), "Tinput", &Tinput).ok() &&
-        GetNodeAttr(n->def(), "Tfilter", &Tfilter).ok())) {
-    return nullptr;
-  }
-  if (mkl_op_registry::IsMklOp(mkl_op_registry::GetMklOpName(n->type_string()),
-                               Tinput, Tfilter)) {
-    for (auto ri = rinfo_.cbegin(); ri != rinfo_.cend(); ++ri) {
-      if (n->type_string().compare(ri->name) == 0 && ri->rewrite_rule(n)) {
-        return &*ri;
+
+  if ((GetNodeAttr(n->def(), "Tinput", &Tinput).ok() &&
+       GetNodeAttr(n->def(), "Tfilter", &Tfilter).ok()) ||
+      (GetNodeAttr(n->def(), "T1", &T1).ok() &&
+       GetNodeAttr(n->def(), "T2", &T2).ok())) {
+    if (mkl_op_registry::IsMklOp(
+            mkl_op_registry::GetMklOpName(n->type_string()), T1, T2) ||
+        mkl_op_registry::IsMklOp(
+            mkl_op_registry::GetMklOpName(n->type_string()), Tinput, Tfilter)) {
+      for (auto ri = rinfo_.cbegin(); ri != rinfo_.cend(); ++ri) {
+        if (n->type_string().compare(ri->name) == 0 && ri->rewrite_rule(n)) {
+          return &*ri;
+        }
       }
     }
   }
+
   return nullptr;
 }
 

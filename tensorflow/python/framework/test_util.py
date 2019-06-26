@@ -49,7 +49,6 @@ from google.protobuf import descriptor_pool
 from google.protobuf import text_format
 
 from tensorflow.core.framework import graph_pb2
-from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python import pywrap_tensorflow
 from tensorflow.python import tf2
@@ -1278,7 +1277,7 @@ def run_v2_only(func=None):
 
     def decorated(self, *args, **kwargs):
       if not tf2.enabled():
-        self.skipTest("Test is only comptaible in v2")
+        self.skipTest("Test is only compatible with v2")
 
       return f(self, *args, **kwargs)
 
@@ -1554,6 +1553,44 @@ def use_deterministic_cudnn(func):
 
 
 # The description is just for documentation purposes.
+def enable_tf_xla_constant_folding(description):
+
+  if not isinstance(description, str):
+    raise ValueError("'description' should be string, got {}".format(
+        type(description)))
+
+  def enable_tf_xla_constant_folding_impl(func):
+    """Enable constant folding during the call to this function.
+
+    Some tests fail without constant folding.
+
+    Args:
+      func: Function to run with constant folding turned on.
+
+    Returns:
+      Decorated function.
+    """
+
+    def decorator(f):
+
+      def decorated(self, *args, **kwargs):
+        original_var = pywrap_tensorflow.TF_GetXlaConstantFoldingDisabled()
+        pywrap_tensorflow.TF_SetXlaConstantFoldingDisabled(False)
+        result = f(self, *args, **kwargs)
+        pywrap_tensorflow.TF_SetXlaConstantFoldingDisabled(original_var)
+        return result
+
+      return decorated
+
+    if func is not None:
+      return decorator(func)
+
+    return decorator
+
+  return enable_tf_xla_constant_folding_impl
+
+
+# The description is just for documentation purposes.
 def disable_xla(description):
 
   def disable_xla_impl(func):
@@ -1678,9 +1715,12 @@ class TensorFlowTestCase(googletest.TestCase):
   def __init__(self, methodName="runTest"):  # pylint: disable=invalid-name
     super(TensorFlowTestCase, self).__init__(methodName)
     if is_xla_enabled():
-      pywrap_tensorflow.TF_SetXLaAutoJitMode("2")
+      pywrap_tensorflow.TF_SetXlaAutoJitMode("2")
       pywrap_tensorflow.TF_SetXlaMinClusterSize(1)
       pywrap_tensorflow.TF_SetXlaEnableLazyCompilation(False)
+      # Constant folding secretly runs code on TF:Classic CPU, so we also
+      # disable it here.
+      pywrap_tensorflow.TF_SetXlaConstantFoldingDisabled(True)
 
     self._threads = []
     self._tempdir = None
@@ -1860,7 +1900,8 @@ class TensorFlowTestCase(googletest.TestCase):
                                                  tensor.dense_shape.numpy())
         elif ragged_tensor.is_ragged(tensor):
           return ragged_tensor_value.RaggedTensorValue(
-              tensor.values.numpy(), tensor.row_splits.numpy())
+              self._eval_tensor(tensor.values),
+              self._eval_tensor(tensor.row_splits))
         elif isinstance(tensor, ops.IndexedSlices):
           return ops.IndexedSlicesValue(
               values=tensor.values.numpy(),
@@ -2323,6 +2364,8 @@ class TensorFlowTestCase(googletest.TestCase):
           to the nested structure, e.g. given `a = [(1, 1), {'d': (6, 7)}]` and
           `[p] = [1]['d']`, then `a[p] = (6, 7)`.
     """
+    if ragged_tensor.is_ragged(a) or ragged_tensor.is_ragged(b):
+      return self._assertRaggedClose(a, b, rtol, atol, msg)
     self._assertAllCloseRecursive(a, b, rtol=rtol, atol=atol, msg=msg)
 
   @py_func_if_in_function
@@ -2401,6 +2444,8 @@ class TensorFlowTestCase(googletest.TestCase):
       b: the actual numpy ndarray or anything can be converted to one.
       msg: Optional message to report on failure.
     """
+    if (ragged_tensor.is_ragged(a) or ragged_tensor.is_ragged(b)):
+      return self._assertRaggedEqual(a, b, msg)
     msg = msg if msg else ""
     a = self._GetNdArray(a)
     b = self._GetNdArray(b)
@@ -2690,6 +2735,51 @@ class TensorFlowTestCase(googletest.TestCase):
         device1, device2,
         "Devices %s and %s are not equal. %s" % (device1, device2, msg))
 
+  def _GetPyList(self, a):
+    """Converts `a` to a nested python list."""
+    if isinstance(a, ragged_tensor.RaggedTensor):
+      return self.evaluate(a).to_list()
+    elif isinstance(a, ops.Tensor):
+      a = self.evaluate(a)
+      return a.tolist() if isinstance(a, np.ndarray) else a
+    elif isinstance(a, np.ndarray):
+      return a.tolist()
+    elif isinstance(a, ragged_tensor_value.RaggedTensorValue):
+      return a.to_list()
+    else:
+      return np.array(a).tolist()
+
+  def _assertRaggedEqual(self, a, b, msg):
+    """Asserts that two ragged tensors are equal."""
+    a_list = self._GetPyList(a)
+    b_list = self._GetPyList(b)
+    self.assertEqual(a_list, b_list, msg)
+
+    if not (isinstance(a, (list, tuple)) or isinstance(b, (list, tuple))):
+      a_ragged_rank = a.ragged_rank if ragged_tensor.is_ragged(a) else 0
+      b_ragged_rank = b.ragged_rank if ragged_tensor.is_ragged(b) else 0
+      self.assertEqual(a_ragged_rank, b_ragged_rank, msg)
+
+  def _assertRaggedClose(self, a, b, rtol, atol, msg=None):
+    a_list = self._GetPyList(a)
+    b_list = self._GetPyList(b)
+    self._assertListCloseRecursive(a_list, b_list, rtol, atol, msg)
+
+    if not (isinstance(a, (list, tuple)) or isinstance(b, (list, tuple))):
+      a_ragged_rank = a.ragged_rank if ragged_tensor.is_ragged(a) else 0
+      b_ragged_rank = b.ragged_rank if ragged_tensor.is_ragged(b) else 0
+      self.assertEqual(a_ragged_rank, b_ragged_rank, msg)
+
+  def _assertListCloseRecursive(self, a, b, rtol, atol, msg, path="value"):
+    self.assertEqual(type(a), type(b))
+    if isinstance(a, (list, tuple)):
+      self.assertLen(a, len(b), "Length differs for %s" % path)
+      for i in range(len(a)):
+        self._assertListCloseRecursive(a[i], b[i], rtol, atol, msg,
+                                       "%s[%s]" % (path, i))
+    else:
+      self._assertAllCloseRecursive(a, b, rtol, atol, path, msg)
+
   # Fix Python 3 compatibility issues
   if six.PY3:
     # pylint: disable=invalid-name
@@ -2741,12 +2831,10 @@ class TensorFlowTestCase(googletest.TestCase):
       # will be used even when a specific device is supposed to be used.
       allow_soft_placement = not force_gpu
       if config is None:
-        config = config_pb2.ConfigProto()
+        config = context.context().config
         config.allow_soft_placement = allow_soft_placement
-        config.gpu_options.per_process_gpu_memory_fraction = 0.3
       elif not allow_soft_placement and config.allow_soft_placement:
-        config_copy = config_pb2.ConfigProto()
-        config_copy.CopyFrom(config)
+        config_copy = context.context().config
         config = config_copy
         config.allow_soft_placement = False
       # Don't perform optimizations for tests so we don't inadvertently run

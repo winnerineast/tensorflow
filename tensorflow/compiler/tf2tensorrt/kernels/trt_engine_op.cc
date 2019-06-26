@@ -21,7 +21,6 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "tensorflow/compiler/tf2tensorrt/convert/convert_nodes.h"
 #include "tensorflow/compiler/tf2tensorrt/convert/utils.h"
-#include "tensorflow/compiler/tf2tensorrt/plugin/trt_plugin_factory.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/calibration_resource.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_allocator.h"
 #include "tensorflow/compiler/tf2tensorrt/utils/trt_logger.h"
@@ -161,6 +160,7 @@ void* GetTensorAddress(const Tensor* tensor_ptr) {
     TYPECASE(DT_FLOAT, tensor_ptr, dest_ptr);
     TYPECASE(DT_HALF, tensor_ptr, dest_ptr);
     TYPECASE(DT_INT8, tensor_ptr, dest_ptr);
+    TYPECASE(DT_INT32, tensor_ptr, dest_ptr);
     default: {
       LOG(ERROR) << "Unsupported Data type " << DataTypeString(tensor_type);
       return nullptr;
@@ -196,12 +196,8 @@ TRTEngineOp::TRTEngineOp(OpKernelConstruction* context)
                  context->GetAttr("workspace_size_bytes", &workspace_size_));
   OP_REQUIRES_OK(context, context->GetAttr("static_engine", &static_engine_));
   if (!static_engine_) {
-    if (!segment_graph_.ParseFromString(serialized_segment_)) {
-      LOG(ERROR) << "Parsing segment graph failed!";
-      context->SetStatus(
-          errors::InvalidArgument("Failed to parse segment graphdef!"));
-      return;
-    }
+    OP_REQUIRES(context, segment_graph_.ParseFromString(serialized_segment_),
+                errors::InvalidArgument("Failed to parse segment graphdef!"));
     VLOG(1) << "Size of serialized GraphDef: "
             << serialized_segment_.capacity();
     string tmp;
@@ -285,7 +281,7 @@ void TRTEngineOp::ExecuteCalibration(OpKernelContext* ctx,
   OP_REQUIRES_OK_ASYNC(
       ctx,
       ctx->resource_manager()->LookupOrCreate(
-          "TF-TRT-Calibration", name(),
+          std::string(kCalibrationContainerName), name(),
           reinterpret_cast<TRTCalibrationResource**>(&calib_res),
           {[ctx, this](TRTCalibrationResource** cr) -> Status {
             return this->AllocateCalibrationResources(ctx, cr);
@@ -299,11 +295,10 @@ void TRTEngineOp::ExecuteCalibration(OpKernelContext* ctx,
   for (int i = 0; i < num_inputs; i++) {
     const Tensor& t = ctx->input(i);
     void* data_address = GetTensorAddress(&t);
-    if (data_address == nullptr) {
-      ctx->SetStatus(errors::InvalidArgument(
-          "Unsupported data type encountered in input ", i));
-      return;
-    }
+    OP_REQUIRES_ASYNC(ctx, data_address,
+                      errors::InvalidArgument(
+                          "Unsupported data type encountered in input ", i),
+                      *helper);
     // Check the allocated buffer is sufficient for input
     const auto device_tensor =
         calib_res->device_tensors_.at(i).AccessTensor(ctx);
@@ -542,7 +537,7 @@ EngineContext* TRTEngineOp::GetEngine(
   // Get engine cache.
   TRTEngineCacheResource* cache_res = nullptr;
   auto status = ctx->resource_manager()->LookupOrCreate(
-      std::string(kCalibrationContainerName), string(resource_name), &cache_res,
+      "TF-TRT-Engine-Cache", string(resource_name), &cache_res,
       {[this, ctx](TRTEngineCacheResource** cr) -> Status {
         *cr = new TRTEngineCacheResource(ctx, this->max_cached_engines_);
         return Status::OK();
@@ -577,8 +572,7 @@ EngineContext* TRTEngineOp::GetEngine(
     infer->setGpuAllocator(allocator);
     TrtUniquePtrType<nvinfer1::ICudaEngine> static_engine(
         infer->deserializeCudaEngine(serialized_segment_.c_str(),
-                                     serialized_segment_.size(),
-                                     PluginFactoryTensorRT::GetInstance()));
+                                     serialized_segment_.size(), nullptr));
     auto raw_static_engine = static_engine.get();
     const auto max_batch_size = raw_static_engine->getMaxBatchSize();
     // Static engine will have max_batch_size for batch size so that all inputs

@@ -1,4 +1,3 @@
-# -*- Python -*-
 """Repository rule for system library autoconfiguration.
 
 `syslibs_configure` depends on the following environment variables:
@@ -20,7 +19,9 @@ VALID_LIBS = [
     "curl",
     "cython",
     "double_conversion",
+    "enum34_archive",
     "flatbuffers",
+    "functools32_archive",
     "gast_archive",
     "gif_archive",
     "grpc",
@@ -32,6 +33,7 @@ VALID_LIBS = [
     "lmdb",
     "nasm",
     "nsync",
+    "opt_einsum_archive",
     "org_sqlite",
     "pasta",
     "pcre",

@@ -37,8 +37,8 @@ py_library(
         ":option_builder",
         ":tfprof_logger",
         "//tensorflow/core/profiler:protos_all_py",
+        "//tensorflow/python:_pywrap_tfprof",
         "//tensorflow/python:errors",
-        "//tensorflow/python:pywrap_tensorflow",
         "@six_archive//:six",
     ],
 )
@@ -132,7 +132,10 @@ cuda_py_test(
         "//tensorflow/python/profiler/internal:model_analyzer_testlib",
         "//tensorflow/python:variables",
     ],
-    tags = ["no_pip"],
+    tags = [
+        "no_gpu",  # b/136036359
+        "no_pip",
+    ],
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
 )
 
@@ -159,5 +162,23 @@ py_test(
         "//tensorflow/python:control_flow_ops",
         "//tensorflow/python:math_ops",
         "@com_google_pprof//:pprof_proto_py",
+    ],
+)
+
+py_library(
+    name = "traceme",
+    srcs = ["traceme.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/python:platform",
+    ],
+)
+
+py_library(
+    name = "scoped_annotation",
+    srcs = ["scoped_annotation.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        "//tensorflow/python:platform",
     ],
 )

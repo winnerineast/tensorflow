@@ -31,44 +31,37 @@ from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import type_spec
 from tensorflow.python.ops import tensor_array_ops
 from tensorflow.python.ops.ragged import ragged_tensor
+from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.util import deprecation
+from tensorflow.python.util.compat import collections_abc
 from tensorflow.python.util.tf_export import tf_export
 
 
-# Define backwards-compatiblity wrappers for using TypeSpec and its subclasses
-# to replace Structure and its subclasses.  Note that the constructor argument
-# order is different in many cases -- in particular, TypeSpec follows TensorSpec
-# and uses the order (shape, dtype); but most Structure subclasses use the
-# order (dtype, shape).
-#
-# TODO(b/133606651) Update tf.data to use TypeSpec directly, and then remove
-# these compatibility wrappers.
-
-
-Structure = type_spec.TypeSpec
-
-
 # pylint: disable=invalid-name
-
-
-@tf_export("data.experimental.TensorStructure")
-def TensorStructure(dtype, shape):
+@tf_export(v1=["data.experimental.TensorStructure"])
+@deprecation.deprecated(None, "Use `tf.TensorSpec` instead.")
+def _TensorStructure(dtype, shape):
   return tensor_spec.TensorSpec(shape, dtype)
 
 
-@tf_export("data.experimental.SparseTensorStructure")
-def SparseTensorStructure(dtype, shape):
+@tf_export(v1=["data.experimental.SparseTensorStructure"])
+@deprecation.deprecated(None, "Use `tf.SparseTensorSpec` instead.")
+def _SparseTensorStructure(dtype, shape):
   return sparse_tensor.SparseTensorSpec(shape, dtype)
 
 
-@tf_export("data.experimental.TensorArrayStructure")
-def TensorArrayStructure(dtype, element_shape, dynamic_size, infer_shape):
+@tf_export(v1=["data.experimental.TensorArrayStructure"])
+@deprecation.deprecated(None, "Use `tf.TensorArraySpec` instead.")
+def _TensorArrayStructure(dtype, element_shape, dynamic_size, infer_shape):
   return tensor_array_ops.TensorArraySpec(element_shape, dtype,
                                           dynamic_size, infer_shape)
 
 
-@tf_export("data.experimental.RaggedTensorStructure")
-def RaggedTensorStructure(dtype, shape, ragged_rank):
+@tf_export(v1=["data.experimental.RaggedTensorStructure"])
+@deprecation.deprecated(None, "Use `tf.RaggedTensorSpec` instead.")
+def _RaggedTensorStructure(dtype, shape, ragged_rank):
   return ragged_tensor.RaggedTensorSpec(shape, dtype, ragged_rank)
+# pylint: enable=invalid-name
 
 
 # TODO(jsimsa): Remove the special-case for `TensorArray` pass-through once
@@ -91,26 +84,32 @@ def normalize_element(element):
   """
   components = nest.flatten(element)
   normalized_components = []
-  with ops.name_scope("normalize_tensors"):
-    # Imported here to avoid circular dependency
+  with ops.name_scope("normalize_element"):
+    # Imported here to avoid circular dependency.
     from tensorflow.python.data.ops import dataset_ops  # pylint: disable=g-import-not-at-top
     for i, t in enumerate(components):
-      spec = type_spec_from_value(t)
-      if isinstance(spec, sparse_tensor.SparseTensorSpec):
-        normalized_components.append(sparse_tensor.SparseTensor.from_value(t))
-      elif isinstance(spec, ragged_tensor.RaggedTensorSpec):
-        normalized_components.append(
-            ragged_tensor.convert_to_tensor_or_ragged_tensor(
-                t, name="component_%d" % i))
-      elif isinstance(
-          spec,
-          (tensor_array_ops.TensorArraySpec, dataset_ops.DatasetStructure)):
-        normalized_components.append(t)
-      elif isinstance(t, composite_tensor.CompositeTensor):
-        normalized_components.append(t)
-      else:
+      try:
+        spec = type_spec_from_value(t, use_fallback=False)
+      except TypeError:
+        # TypeError indicates it was not possible to compute a `TypeSpec` for
+        # the value. As a fallback try converting the value to a tensor.
         normalized_components.append(
             ops.convert_to_tensor(t, name="component_%d" % i))
+      else:
+        if isinstance(spec, sparse_tensor.SparseTensorSpec):
+          normalized_components.append(sparse_tensor.SparseTensor.from_value(t))
+        elif isinstance(spec, ragged_tensor.RaggedTensorSpec):
+          normalized_components.append(
+              ragged_tensor.convert_to_tensor_or_ragged_tensor(
+                  t, name="component_%d" % i))
+        elif isinstance(
+            spec, (tensor_array_ops.TensorArraySpec, dataset_ops.DatasetSpec)):
+          normalized_components.append(t)
+        elif isinstance(t, composite_tensor.CompositeTensor):
+          normalized_components.append(t)
+        else:
+          normalized_components.append(
+              ops.convert_to_tensor(t, name="component_%d" % i))
   return nest.pack_sequence_as(element, normalized_components)
 
 
@@ -150,14 +149,14 @@ def convert_legacy_structure(output_types, output_shapes, output_classes):
     if isinstance(flat_class, type_spec.TypeSpec):
       flat_ret.append(flat_class)
     elif issubclass(flat_class, sparse_tensor.SparseTensor):
-      flat_ret.append(SparseTensorStructure(flat_type, flat_shape))
+      flat_ret.append(sparse_tensor.SparseTensorSpec(flat_shape, flat_type))
     elif issubclass(flat_class, ops.Tensor):
-      flat_ret.append(TensorStructure(flat_type, flat_shape))
+      flat_ret.append(tensor_spec.TensorSpec(flat_shape, flat_type))
     elif issubclass(flat_class, tensor_array_ops.TensorArray):
       # We sneaked the dynamic_size and infer_shape into the legacy shape.
       flat_ret.append(
-          TensorArrayStructure(
-              flat_type, flat_shape[2:],
+          tensor_array_ops.TensorArraySpec(
+              flat_shape[2:], flat_type,
               dynamic_size=tensor_shape.dimension_value(flat_shape[0]),
               infer_shape=tensor_shape.dimension_value(flat_shape[1])))
     else:
@@ -402,11 +401,13 @@ def are_compatible(spec1, spec2):
   return True
 
 
-def type_spec_from_value(element):
+def type_spec_from_value(element, use_fallback=True):
   """Creates a type specification for the given value.
 
   Args:
     element: The element to create the type specification for.
+    use_fallback: Whether to fall back to converting the element to a tensor
+      in order to compute its `TypeSpec`.
 
   Returns:
     A nested structure of `TypeSpec`s that represents the type specification
@@ -420,7 +421,7 @@ def type_spec_from_value(element):
   if spec is not None:
     return spec
 
-  if isinstance(element, dict):
+  if isinstance(element, collections_abc.Mapping):
     # We create a shallow copy in an attempt to preserve the key order.
     #
     # Note that we do not guarantee that the key order is preserved, which is
@@ -428,10 +429,11 @@ def type_spec_from_value(element):
     # `type_spec_from_value` should not assume that the key order of a `dict`
     # in the returned nested structure matches the key order of the
     # corresponding `dict` in the input value.
-    result = element.copy()
-    for k in element:
-      result[k] = type_spec_from_value(element[k])
-    return result
+    if isinstance(element, collections.defaultdict):
+      ctor = lambda items: type(element)(element.default_factory, items)
+    else:
+      ctor = type(element)
+    return ctor([(k, type_spec_from_value(v)) for k, v in element.items()])
 
   if isinstance(element, tuple):
     if hasattr(element, "_fields") and isinstance(
@@ -442,14 +444,16 @@ def type_spec_from_value(element):
     # `element` is not a namedtuple
     return tuple([type_spec_from_value(v) for v in element])
 
-  # Fallback: try converting value to a tensor.
-  try:
-    tensor = ops.convert_to_tensor(element)
-    spec = type_spec_from_value(tensor)
-    if spec is not None:
-      return spec
-  except (ValueError, TypeError):
-    pass
+  if use_fallback:
+    # As a fallback try converting the element to a tensor.
+    try:
+      tensor = ops.convert_to_tensor(element)
+      spec = type_spec_from_value(tensor)
+      if spec is not None:
+        return spec
+    except (ValueError, TypeError) as e:
+      logging.vlog(
+          3, "Failed to convert %r to tensor: %s" % (type(element).__name__, e))
 
   raise TypeError("Could not build a TypeSpec for %r with type %s" %
                   (element, type(element).__name__))

@@ -25,32 +25,6 @@ limitations under the License.
 namespace tensorflow {
 namespace functor {
 
-// TODO(yangke): revisit these operations and in particular, see if we can
-// combine all of them into just one operation without causing nvcc to
-// timeout.
-template <typename Device, typename T, int Dims, typename IndexType>
-struct ShuffleAndReverse {
-  void operator()(const Device& d,
-                  typename TTypes<T, Dims, IndexType>::ConstTensor input,
-                  const Eigen::DSizes<IndexType, Dims>& order,
-                  const Eigen::array<bool, Dims>& reverse_dims,
-                  typename TTypes<T, Dims, IndexType>::Tensor output) {
-    output.device(d) = input.shuffle(order).reverse(reverse_dims);
-  }
-};
-
-template <typename Device, typename T, int Dims, typename IndexType>
-struct InflatePadAndShuffle {
-  void operator()(
-      const Device& d, typename TTypes<T, Dims, IndexType>::ConstTensor input,
-      const Eigen::DSizes<IndexType, Dims>& strides,
-      const Eigen::array<Eigen::IndexPair<IndexType>, Dims>& pad_dims,
-      const Eigen::DSizes<IndexType, Dims>& order,
-      typename TTypes<T, Dims, IndexType>::Tensor output) {
-    output.device(d) = input.inflate(strides).pad(pad_dims).shuffle(order);
-  }
-};
-
 template <typename Device, typename Input, typename Filter, typename Output,
           typename OutputKernel>
 void SpatialConvolutionFunc(const Device& d, Output output, Input input,
@@ -128,22 +102,6 @@ struct SpatialConvolution<Device, Eigen::half, OutputKernel> {
   }
 };
 
-template <typename Device, typename T>
-struct SpatialConvolutionBackwardFilter {
-  void operator()(const Device& d,
-                  typename TTypes<T, 4>::Tensor kernel_backward,
-                  typename TTypes<T, 4>::ConstTensor input,
-                  typename TTypes<T, 4>::ConstTensor output_backward,
-                  int row_stride, int col_stride, int row_dilation,
-                  int col_dilation) {
-    // Need to swap row/col when calling Eigen.
-    kernel_backward.device(d) = Eigen::SpatialConvolutionBackwardKernel(
-        input, output_backward, kernel_backward.dimension(1),
-        kernel_backward.dimension(0), col_stride, row_stride, col_dilation,
-        row_dilation);
-  }
-};
-
 // TODO(vrv): Figure out how to use the MatMulFunctor in matmul_op.h.
 // My initial attempt to do this compiled but failed in the pytest
 // due to a swigdeps error.
@@ -215,6 +173,8 @@ struct TransformFilter {
   }
 };
 
+// TODO This functor is not used anywhere and should be removed,
+// but it defines some eigen templates that are referenced in other kernels.
 template <typename Device, typename T, typename IndexType>
 struct TransformDepth {
   void operator()(const Device& d,

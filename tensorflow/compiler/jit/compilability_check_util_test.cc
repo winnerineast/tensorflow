@@ -21,8 +21,10 @@ limitations under the License.
 #include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/graph_to_functiondef.h"
+#include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
 #include "tensorflow/core/graph/graph_def_builder_util.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -31,11 +33,14 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
+constexpr char kFunctionalIfNodeName[] = "If";
 constexpr char kFunctionalWhileNodeName[] = "While";
 constexpr char kCompilableFunctionName[] = "CompilableFn";
 constexpr char kCompilableFunctionNodeName[] = "n_c";
 constexpr char kUncompilableFunctionName[] = "UncompilableFn";
 constexpr char kUncompilableFunctionNodeName[] = "n_c_uncompilable";
+constexpr char kUncompilableFunctionTwoName[] = "UncompilableFnTwo";
+constexpr char kUncompilableFunctionNodeTwoName[] = "n_d_uncompilable";
 
 // A dummy OpKernel for testing.
 class DummyCompilableOp : public XlaOpKernel {
@@ -114,10 +119,16 @@ TEST_F(CompilabilityCheckUtilTest, CheckNonFunctionalNodes) {
   const auto uncompilable_nodes =
       checker_->FindUncompilableNodes(*uncompilable_op, flib_runtime);
   ASSERT_EQ(1, uncompilable_nodes.size());
-  const auto& node_info = uncompilable_nodes.at(0);
-  EXPECT_EQ("unsupported op", node_info.uncompilable_reason);
-  ASSERT_EQ(1, node_info.stack_trace.size());
-  ASSERT_EQ("", node_info.stack_trace.at(0).function_name);
+  auto node_info_it =
+      uncompilable_nodes.find(NameAttrList().ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), node_info_it);
+  const auto& uncompilable_nodes_inside_function = node_info_it->second.second;
+  ASSERT_EQ(1, uncompilable_nodes_inside_function.size());
+  const auto& uncompilable_node_info = uncompilable_nodes_inside_function.at(0);
+  EXPECT_TRUE(absl::StrContains(uncompilable_node_info.uncompilable_reason,
+                                "unsupported op"));
+  ASSERT_EQ(1, uncompilable_node_info.stack_trace.size());
+  ASSERT_EQ("", uncompilable_node_info.stack_trace.at(0).function_name);
 }
 
 TEST_F(CompilabilityCheckUtilTest, CheckSimpleFunctionNode) {
@@ -144,14 +155,21 @@ TEST_F(CompilabilityCheckUtilTest, CheckSimpleFunctionNode) {
       checker_->FindUncompilableNodes(*functional_node, flib_runtime);
 
   EXPECT_EQ(1, uncompilable_nodes.size());
-  const auto& node_info = uncompilable_nodes.at(0);
+  NameAttrList function;
+  function.set_name(kUncompilableFunctionName);
+  const auto node_info_it =
+      uncompilable_nodes.find(function.ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), node_info_it);
+  const auto& uncompilable_node_list = node_info_it->second.second;
+  ASSERT_EQ(1, uncompilable_node_list.size());
+  const auto& node_info = uncompilable_node_list.at(0);
   const auto& node_stack = node_info.stack_trace;
   ASSERT_EQ(2, node_stack.size());
   EXPECT_EQ("D", node_stack.at(0).name);
   EXPECT_EQ(kUncompilableFunctionNodeName, node_stack.at(1).name);
-
   EXPECT_EQ(kUncompilableFunctionNodeName, node_info.name);
-  EXPECT_EQ("unsupported op", node_info.uncompilable_reason);
+  EXPECT_TRUE(
+      absl::StrContains(node_info.uncompilable_reason, "unsupported op"));
 }
 
 TEST_F(CompilabilityCheckUtilTest, CheckFunctionalWhileNode) {
@@ -209,7 +227,15 @@ TEST_F(CompilabilityCheckUtilTest, CheckFunctionalWhileNode) {
       checker_->FindUncompilableNodes(**while_node_it, flib_runtime);
   ASSERT_EQ(1, uncompilable_nodes.size());
 
-  const auto& node_info = uncompilable_nodes.at(0);
+  NameAttrList function;
+  function.set_name(kUncompilableFunctionName);
+  const auto node_info_it =
+      uncompilable_nodes.find(function.ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), node_info_it);
+  const auto& uncompilable_node_list = node_info_it->second.second;
+  ASSERT_EQ(1, uncompilable_node_list.size());
+  const auto& node_info = uncompilable_node_list.at(0);
+
   const auto& node_stack = node_info.stack_trace;
   ASSERT_EQ(2, node_stack.size());
   const auto& stacktrace_first_node_info = node_stack.at(0);
@@ -222,7 +248,109 @@ TEST_F(CompilabilityCheckUtilTest, CheckFunctionalWhileNode) {
             stacktrace_second_node_info.function_name);
 
   EXPECT_EQ(kUncompilableFunctionNodeName, node_info.name);
-  EXPECT_EQ("unsupported op", node_info.uncompilable_reason);
+  EXPECT_TRUE(
+      absl::StrContains(node_info.uncompilable_reason, "unsupported op"));
+}
+
+TEST_F(CompilabilityCheckUtilTest, CheckFunctionalIfNode) {
+  FunctionDefLibrary flib;
+  *flib.add_function() = FunctionDefHelper::Define(
+      /*Function*/ kUncompilableFunctionName,
+      /*Inputs*/ {"n_a:float"},
+      /*Outputs*/ {"n_c_uncompilable:float"},
+      /*Attributes*/ {},
+      // Node info
+      {{{kUncompilableFunctionNodeName}, "MissingKernel", {"n_a"}}});
+  *flib.add_function() = FunctionDefHelper::Define(
+      /*Function*/ kUncompilableFunctionTwoName,
+      /*Inputs*/ {"n_a:float"},
+      /*Outputs*/ {"n_d_uncompilable:float"},
+      /*Attribute*/ {},
+      // Node info
+      {{{kUncompilableFunctionNodeTwoName}, "MissingKernel", {"n_a"}}});
+  NameAttrList uncompilable_fn1_attr;
+  uncompilable_fn1_attr.set_name(kUncompilableFunctionName);
+  NameAttrList uncompilable_fn2_attr;
+  uncompilable_fn2_attr.set_name(kUncompilableFunctionTwoName);
+
+  Scope root = Scope::NewRootScope().ExitOnError();
+  TF_ASSERT_OK(root.graph()->AddFunctionLibrary(flib));
+  auto predicate = ops::Placeholder(root.WithOpName("pred"), DT_BOOL);
+  auto placeholder = ops::Placeholder(root.WithOpName("A"), DT_INT32);
+  std::vector<NodeBuilder::NodeOut> if_inputs(
+      {NodeBuilder::NodeOut(placeholder.node())});
+  Node* if_node;
+  TF_ASSERT_OK(
+      NodeBuilder(kFunctionalIfNodeName, "If", &root.graph()->flib_def())
+          .Input(predicate.node())
+          .Input(if_inputs)
+          .Attr("then_branch", uncompilable_fn1_attr)
+          .Attr("else_branch", uncompilable_fn2_attr)
+          .Attr("Tout", {DT_INT32})
+          .Finalize(root.graph(), &if_node));
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_ASSERT_OK(root.ToGraph(graph.get()));
+
+  flib_def_.reset(new FunctionLibraryDefinition(OpRegistry::Global(), flib));
+
+  auto if_node_it = std::find_if(
+      graph->nodes().begin(), graph->nodes().end(),
+      [&](const Node* n) { return n->name() == kFunctionalIfNodeName; });
+  EXPECT_NE(if_node_it, graph->nodes().end());
+  auto* flib_runtime = GetFunctionLibraryRuntime();
+
+  EXPECT_FALSE(checker_->IsCompilableNode(**if_node_it, flib_runtime));
+  const auto uncompilable_nodes =
+      checker_->FindUncompilableNodes(**if_node_it, flib_runtime);
+  ASSERT_EQ(2, uncompilable_nodes.size());
+
+  NameAttrList function_one;
+  function_one.set_name(kUncompilableFunctionName);
+  auto it = uncompilable_nodes.find(function_one.ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), it);
+
+  const auto& uncompilable_node_list = it->second.second;
+  ASSERT_EQ(1, uncompilable_node_list.size());
+  const auto& uncompilable_node_one = uncompilable_node_list.at(0);
+  const auto& node_one_stack = uncompilable_node_one.stack_trace;
+
+  ASSERT_EQ(2, node_one_stack.size());
+  const auto& node_one_stacktrace_first_node = node_one_stack.at(0);
+  EXPECT_EQ(kFunctionalIfNodeName, node_one_stacktrace_first_node.name);
+  EXPECT_EQ("", node_one_stacktrace_first_node.function_name);
+
+  const auto& stacktrace_second_node_info = node_one_stack.at(1);
+  EXPECT_EQ(kUncompilableFunctionNodeName, stacktrace_second_node_info.name);
+  EXPECT_EQ(kUncompilableFunctionName,
+            stacktrace_second_node_info.function_name);
+
+  EXPECT_EQ(kUncompilableFunctionNodeName, uncompilable_node_one.name);
+  EXPECT_TRUE(absl::StrContains(uncompilable_node_one.uncompilable_reason,
+                                "unsupported op"));
+
+  NameAttrList function_two;
+  function_two.set_name(kUncompilableFunctionTwoName);
+  it = uncompilable_nodes.find(function_two.ShortDebugString());
+  ASSERT_NE(uncompilable_nodes.end(), it);
+
+  const auto& uncompilable_node_two_list = it->second.second;
+  ASSERT_EQ(1, uncompilable_node_two_list.size());
+  const auto& uncompilable_node_two = uncompilable_node_two_list.at(0);
+  const auto& node_two_stack = uncompilable_node_two.stack_trace;
+  ASSERT_EQ(2, node_two_stack.size());
+  const auto& node_two_stacktrace_first_node = node_two_stack.at(0);
+  EXPECT_EQ(kFunctionalIfNodeName, node_two_stacktrace_first_node.name);
+  EXPECT_EQ("", node_two_stacktrace_first_node.function_name);
+
+  const auto& node_two_stacktrace_second_node = node_two_stack.at(1);
+  EXPECT_EQ(kUncompilableFunctionNodeTwoName,
+            node_two_stacktrace_second_node.name);
+  EXPECT_EQ(kUncompilableFunctionTwoName,
+            node_two_stacktrace_second_node.function_name);
+
+  EXPECT_EQ(kUncompilableFunctionNodeTwoName, uncompilable_node_two.name);
+  EXPECT_TRUE(absl::StrContains(uncompilable_node_one.uncompilable_reason,
+                                "unsupported op"));
 }
 
 }  // namespace

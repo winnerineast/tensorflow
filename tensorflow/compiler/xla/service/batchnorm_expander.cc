@@ -46,13 +46,8 @@ using absl::optional;
 
 // BatchNormExpanderVisitor traverses the HLO computation and rewrites BatchNorm
 // operations into smaller operations.
-class BatchNormExpanderVisitor : public DfsHloVisitorWithDefault {
+class BatchNormExpanderVisitor : public DfsHloRewriteVisitor {
  public:
-  // Default visitor action is to do nothing and return OK.
-  Status DefaultAction(HloInstruction* /*hlo_instruction*/) override {
-    return Status::OK();
-  }
-
   Status HandleBatchNormTraining(HloInstruction* batch_norm) override;
 
   Status HandleBatchNormInference(HloInstruction* batch_norm) override;
@@ -62,9 +57,6 @@ class BatchNormExpanderVisitor : public DfsHloVisitorWithDefault {
   // Runs the visitor on a computation.
   static bool Run(HloComputation* computation, bool rewrite_training_op,
                   bool rewrite_inference_op, bool rewrite_grad_op);
-
-  // Returns whether any batch norm ops were rewritten.
-  const bool changed() const { return changed_; }
 
   ~BatchNormExpanderVisitor() override = default;
 
@@ -113,8 +105,8 @@ class BatchNormExpanderVisitor : public DfsHloVisitorWithDefault {
       HloInstruction* operand, int64 feature_index,
       const std::function<HloInstruction*(std::unique_ptr<HloInstruction>)>&
           add_instruction) {
-    auto elements_per_feature_u32 = add_instruction(
-        HloInstruction::CreateConstant(LiteralUtil::CreateR0<uint32>(1)));
+    auto elements_per_feature_s32 = add_instruction(
+        HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32>(1)));
 
     for (int64 i = 0; i < operand->shape().rank(); ++i) {
       if (i == feature_index) {
@@ -122,39 +114,17 @@ class BatchNormExpanderVisitor : public DfsHloVisitorWithDefault {
       }
       auto dynamic_dimension_size =
           add_instruction(HloInstruction::CreateGetDimensionSize(
-              ShapeUtil::MakeShape(U32, {}), operand, i));
-      elements_per_feature_u32 = add_instruction(HloInstruction::CreateBinary(
-          ShapeUtil::MakeShape(U32, {}), HloOpcode::kMultiply,
-          dynamic_dimension_size, elements_per_feature_u32));
+              ShapeUtil::MakeShape(S32, {}), operand, i));
+      elements_per_feature_s32 = add_instruction(HloInstruction::CreateBinary(
+          ShapeUtil::MakeShape(S32, {}), HloOpcode::kMultiply,
+          dynamic_dimension_size, elements_per_feature_s32));
     }
 
     return HloInstruction::CreateConvert(
         ShapeUtil::MakeShape(operand->shape().element_type(), {}),
-        elements_per_feature_u32);
+        elements_per_feature_s32);
   }
 
-  // Replaces the existing HLO instruction old_instruction, with
-  // new_instruction, and marks the optimizer status as changed.
-  // Returns the Status representing the result of the replace operation.
-  Status ReplaceWithNewInstruction(
-      HloInstruction* old_instruction,
-      std::unique_ptr<HloInstruction> new_instruction) {
-    TF_RETURN_IF_ERROR(computation_->ReplaceWithNewInstruction(
-        old_instruction, std::move(new_instruction)));
-    changed_ = true;
-    return Status::OK();
-  }
-
-  // Replaces the existing HLO instruction old_instruction, with
-  // new_instruction, and marks the optimizer status as changed.
-  // Returns the Status representing the result of the replace operation.
-  Status ReplaceInstruction(HloInstruction* old_instruction,
-                            HloInstruction* new_instruction) {
-    TF_RETURN_IF_ERROR(
-        computation_->ReplaceInstruction(old_instruction, new_instruction));
-    changed_ = true;
-    return Status::OK();
-  }
   // Current HloComputation instance the BatchNormExpander is
   // traversing.
   HloComputation* computation_;
@@ -162,9 +132,6 @@ class BatchNormExpanderVisitor : public DfsHloVisitorWithDefault {
   bool rewrite_training_op_;
   bool rewrite_inference_op_;
   bool rewrite_grad_op_;
-
-  // Whether rewrite has occurred.
-  bool changed_ = false;
 };
 
 }  // namespace
@@ -179,7 +146,7 @@ bool BatchNormExpanderVisitor::Run(HloComputation* computation,
       /*rewrite_inference_op=*/rewrite_inference_op,
       /*rewrite_grad_op=*/rewrite_grad_op);
   TF_CHECK_OK(computation->Accept(&visitor));
-  return visitor.changed_;
+  return visitor.changed();
 }
 
 Status BatchNormExpanderVisitor::HandleBatchNormTraining(

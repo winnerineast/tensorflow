@@ -20,6 +20,7 @@ from __future__ import print_function
 import functools
 import weakref
 
+from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import function as defun
 from tensorflow.python.framework import dtypes
@@ -27,6 +28,7 @@ from tensorflow.python.framework import ops
 from tensorflow.python.training.tracking import base
 from tensorflow.python.training.tracking import data_structures
 from tensorflow.python.util import tf_contextlib
+from tensorflow.python.util.tf_export import tf_export
 
 
 # global _RESOURCE_TRACKER_STACK
@@ -167,6 +169,28 @@ def resource_tracker_scope(resource_tracker):
     _RESOURCE_TRACKER_STACK = old
 
 
+class CapturableResourceDeleter(object):
+  """Deleter to destroy CapturableResource without overriding its __del__()."""
+
+  def __init__(self, destroy_resource_fn=None):
+    if destroy_resource_fn:
+      self._destroy_resource = destroy_resource_fn
+      self._destruction_context = (
+          context.eager_mode if context.executing_eagerly()
+          else ops.get_default_graph().as_default)
+    else:
+      self._destroy_resource = None
+
+  def destroy_resource(self):
+    if self._destroy_resource:
+      return self._destroy_resource()
+
+  def __del__(self):
+    if self._destroy_resource:
+      with self._destruction_context():
+        self._destroy_resource()
+
+
 class CapturableResource(base.Trackable):
   """Holds a Tensor which a tf.function can capture.
 
@@ -177,7 +201,7 @@ class CapturableResource(base.Trackable):
   `CapturableResource` directly.
   """
 
-  def __init__(self, device=""):
+  def __init__(self, device="", deleter=None):
     """Initialize the `CapturableResource`.
 
     Args:
@@ -185,9 +209,12 @@ class CapturableResource(base.Trackable):
         e.g. "CPU" if this resource must be created on a CPU device. A blank
         device allows the user to place resource creation, so generally this
         should be blank unless the resource only makes sense on one device.
+      deleter: A CapturableResourceDeleter that will destroy the created
+        resource during destruction.
     """
     self._resource_handle = None
     self._resource_device = device
+    self._resource_deleter = deleter or CapturableResourceDeleter()
 
   def _create_resource(self):
     """A function that creates a resource handle."""
@@ -217,16 +244,22 @@ class CapturableResource(base.Trackable):
       self._initialize()
       return 1  # Dummy return
 
+    @def_function.function(input_signature=[], autograph=False)
+    def _destroyer():
+      self._resource_deleter.destroy_resource()
+      return 1  # Dummy return
+
     return {
         "_create_resource": _creator,
         "_initialize": _initializer,
+        "_destroy_resource": _destroyer,
     }
 
 
 class TrackableResource(CapturableResource):
   """Adds scope tracking to CapturableResource."""
 
-  def __init__(self, device=""):
+  def __init__(self, device="", deleter=None):
     """Initialize the `TrackableResource`.
 
     Args:
@@ -234,15 +267,53 @@ class TrackableResource(CapturableResource):
         e.g. "CPU" if this resource must be created on a CPU device. A blank
         device allows the user to place resource creation, so generally this
         should be blank unless the resource only makes sense on one device.
+      deleter: A CapturableResourceDeleter that will destroy the created
+        resource during destruction.
     """
     global _RESOURCE_TRACKER_STACK
     for resource_tracker in _RESOURCE_TRACKER_STACK:
       resource_tracker.add_resource(self)
-    super(TrackableResource, self).__init__(device=device)
+    super(TrackableResource, self).__init__(device=device, deleter=deleter)
 
 
-class TrackableAsset(base.Trackable):
-  """Base class for asset files which need to be tracked."""
+@tf_export("saved_model.Asset")
+class Asset(base.Trackable):
+  """Represents a file asset to hermetically include in a SavedModel.
+
+  A SavedModel can include arbitrary files, called assets, that are needed
+  for its use. For example a vocabulary file used initialize a lookup table.
+
+  When a trackable object is exported via `tf.saved_model.save()`, all the
+  `Asset`s reachable from it are copied into the SavedModel assets directory.
+  Upon loading, the assets and the serialized functions that depend on them
+  will refer to the correct filepaths inside the SavedModel directory.
+
+  Example:
+
+  ```
+  filename = tf.saved_model.Asset("file.txt")
+
+  @tf.function(input_signature=[])
+  def func():
+    return tf.io.read_file(filename)
+
+  trackable_obj = tf.train.Checkpoint()
+  trackable_obj.func = func
+  trackable_obj.filename = filename
+  tf.saved_model.save(trackable_obj, "/tmp/saved_model")
+
+  # The created SavedModel is hermetic, it does not depend on
+  # the original file and can be moved to another path.
+  tf.io.gfile.remove("file.txt")
+  tf.io.gfile.rename("/tmp/saved_model", "/tmp/new_location")
+
+  reloaded_obj = tf.saved_model.load("/tmp/new_location")
+  print(reloaded_obj.func())
+  ```
+
+  Attributes:
+    asset_path: A 0-D `tf.string` tensor with path to the asset.
+  """
 
   def __init__(self, path):
     """Record the full path to the asset."""
@@ -349,9 +420,11 @@ def cached_per_instance(f):
     if output is None:
       cache[item] = output = f(item)
     return output
+
+  wrapped.cache = cache
   return wrapped
 
 
 ops.register_tensor_conversion_function(
-    TrackableAsset,
+    Asset,
     lambda asset, **kw: ops.internal_convert_to_tensor(asset.asset_path, **kw))

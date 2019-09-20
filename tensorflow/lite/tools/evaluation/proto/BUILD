@@ -13,9 +13,16 @@
 # limitations under the License.
 # ==============================================================================
 
+# Placeholder for Google-internal load statements.
+
 package(
     default_visibility = ["//visibility:public"],
     licenses = ["notice"],  # Apache 2.0
+)
+
+load(
+    "//tensorflow/core/platform:default/build_config.bzl",
+    "tf_proto_library_py",
 )
 
 proto_library(
@@ -34,6 +41,14 @@ cc_proto_library(
 java_proto_library(
     name = "evaluation_stages_java_proto",
     deps = ["evaluation_stages_proto"],
+)
+
+tf_proto_library_py(
+    name = "evaluation_stages",  # bzl adds _py
+    srcs = [
+        "evaluation_stages.proto",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 proto_library(

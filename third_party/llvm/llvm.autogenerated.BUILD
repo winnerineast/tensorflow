@@ -400,7 +400,7 @@ filegroup(
 
 py_binary(
     name = "lit",
-    srcs = ["utils/lit/lit.py"] + glob(["utils/lit/lit/*.py"]),
+    srcs = ["utils/lit/lit.py"] + glob(["utils/lit/lit/**/*.py"]),
 )
 
 cc_binary(
@@ -472,6 +472,7 @@ cc_library(
         ":selection_dag",
         ":support",
         ":target",
+        ":transform_utils",
     ],
 )
 
@@ -1361,6 +1362,7 @@ cc_library(
     ]),
     copts = llvm_copts,
     deps = [
+        ":bitstream_reader",
         ":config",
         ":core",
         ":support",
@@ -1390,6 +1392,26 @@ cc_library(
         ":core",
         ":mc",
         ":object",
+        ":support",
+    ],
+)
+
+cc_library(
+    name = "bitstream_reader",
+    srcs = glob([
+        "lib/Bitstream/Reader/*.c",
+        "lib/Bitstream/Reader/*.cpp",
+        "lib/Bitstream/Reader/*.inc",
+        "lib/Bitstream/Reader/*.h",
+    ]),
+    hdrs = glob([
+        "include/llvm/Bitstream/Reader/*.h",
+        "include/llvm/Bitstream/Reader/*.def",
+        "include/llvm/Bitstream/Reader/*.inc",
+    ]),
+    copts = llvm_copts,
+    deps = [
+        ":config",
         ":support",
     ],
 )
@@ -1553,6 +1575,26 @@ cc_library(
 )
 
 cc_library(
+    name = "debug_info_gsym",
+    srcs = glob([
+        "lib/DebugInfo/GSYM/*.c",
+        "lib/DebugInfo/GSYM/*.cpp",
+        "lib/DebugInfo/GSYM/*.inc",
+        "lib/DebugInfo/GSYM/*.h",
+    ]),
+    hdrs = glob([
+        "include/llvm/DebugInfo/GSYM/*.h",
+        "include/llvm/DebugInfo/GSYM/*.def",
+        "include/llvm/DebugInfo/GSYM/*.inc",
+    ]),
+    copts = llvm_copts,
+    deps = [
+        ":config",
+        ":support",
+    ],
+)
+
+cc_library(
     name = "debug_info_msf",
     srcs = glob([
         "lib/DebugInfo/MSF/*.c",
@@ -1705,6 +1747,7 @@ cc_library(
         ":config",
         ":core",
         ":mc",
+        ":selection_dag",
         ":support",
         ":target",
         ":transform_utils",
@@ -2715,6 +2758,7 @@ cc_library(
         ":mc",
         ":mc_parser",
         ":support",
+        ":text_api",
     ],
 )
 
@@ -2735,6 +2779,7 @@ cc_library(
     deps = [
         ":config",
         ":debug_info_code_view",
+        ":mc",
         ":object",
         ":support",
     ],
@@ -2781,6 +2826,7 @@ cc_library(
         ":jit_link",
         ":mc",
         ":object",
+        ":passes",
         ":runtime_dyld",
         ":support",
         ":target",
@@ -3014,6 +3060,7 @@ cc_library(
         ":code_gen",
         ":config",
         ":core",
+        ":global_i_sel",
         ":mc",
         ":riscv_desc",
         ":riscv_info",
@@ -3124,6 +3171,7 @@ cc_library(
     ]),
     copts = llvm_copts,
     deps = [
+        ":bitstream_reader",
         ":config",
         ":support",
     ],
@@ -3585,13 +3633,27 @@ cc_library(
         "lib/TextAPI/*.c",
         "lib/TextAPI/*.cpp",
         "lib/TextAPI/*.inc",
+        "lib/TextAPI/ELF/*.cpp",
+        "lib/TextAPI/MachO/*.cpp",
+        "lib/TextAPI/MachO/*.h",
         "lib/TextAPI/*.h",
     ]),
     hdrs = glob([
         "include/llvm/TextAPI/*.h",
         "include/llvm/TextAPI/*.def",
         "include/llvm/TextAPI/*.inc",
-    ]),
+    ]) + [
+        "include/llvm/TextAPI/ELF/TBEHandler.h",
+        "include/llvm/TextAPI/ELF/ELFStub.h",
+        "include/llvm/TextAPI/MachO/Architecture.def",
+        "include/llvm/TextAPI/MachO/PackedVersion.h",
+        "include/llvm/TextAPI/MachO/InterfaceFile.h",
+        "include/llvm/TextAPI/MachO/Symbol.h",
+        "include/llvm/TextAPI/MachO/ArchitectureSet.h",
+        "include/llvm/TextAPI/MachO/TextAPIWriter.h",
+        "include/llvm/TextAPI/MachO/TextAPIReader.h",
+        "include/llvm/TextAPI/MachO/Architecture.h",
+    ],
     copts = llvm_copts,
     deps = [
         ":binary_format",

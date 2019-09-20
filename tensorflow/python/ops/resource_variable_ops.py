@@ -24,6 +24,7 @@ import functools
 
 from tensorflow.core.framework import attr_value_pb2
 from tensorflow.core.framework import variable_pb2
+from tensorflow.python import _pywrap_utils
 from tensorflow.python import pywrap_tensorflow
 from tensorflow.python.eager import context
 from tensorflow.python.eager import tape
@@ -520,8 +521,7 @@ class BaseResourceVariable(variables.VariableV1):
     if self._cached_value is not None:
       return self._cached_value
     with ops.colocate_with(None, ignore_existing=True):
-      with ops.device(self._handle.device):
-        return self._read_variable_op()
+      return self._read_variable_op()
 
   def _as_graph_element(self):
     """Conversion function for Graph.as_graph_element()."""
@@ -540,9 +540,6 @@ class BaseResourceVariable(variables.VariableV1):
     return self._initial_value
 
   @property
-  @deprecated(
-      None,
-      "Apply a constraint manually following the optimizer update step.")
   def constraint(self):
     """Returns the constraint function associated with this variable.
 
@@ -615,7 +612,9 @@ class BaseResourceVariable(variables.VariableV1):
       # Note that if a control flow context is active the input of the read op
       # might not actually be the handle. This line bypasses it.
       tape.record_operation(
-          "ReadVariableOp", [result], [self._handle], lambda x: [x])
+          "ReadVariableOp", [result], [self._handle],
+          backward_function=lambda x: [x],
+          forward_function=lambda x: [x])
     return result
 
   def read_value(self):
@@ -628,9 +627,7 @@ class BaseResourceVariable(variables.VariableV1):
      the read operation.
     """
     with ops.name_scope("Read"):
-      # Ensure we read the variable in the same device as the handle.
-      with ops.device(self._handle.device):
-        value = self._read_variable_op()
+      value = self._read_variable_op()
     # Return an identity so it can get placed on whatever device the context
     # specifies instead of the device where the variable is.
     return array_ops.identity(value)
@@ -1539,9 +1536,14 @@ class ResourceVariable(BaseResourceVariable):
             initial_value = ops.convert_to_tensor(
                 initial_value() if init_from_fn else initial_value,
                 name="initial_value", dtype=dtype)
-          # Don't use `shape or initial_value.shape` since TensorShape has
-          # overridden `__bool__`.
-          shape = shape if shape is not None else initial_value.shape
+          if shape is not None:
+            if not initial_value.shape.is_compatible_with(shape):
+              raise ValueError(
+                  "The initial value's shape (%s) is not compatible with "
+                  "the explicitly supplied `shape` argument (%s)." %
+                  (initial_value.shape, shape))
+          else:
+            shape = initial_value.shape
           handle = eager_safe_variable_handle(
               initial_value=initial_value,
               shape=shape,
@@ -1564,7 +1566,10 @@ class ResourceVariable(BaseResourceVariable):
             is_initialized_op = (
                 gen_resource_variable_ops.var_is_initialized_op(handle))
           if initial_value is not None:
-            with ops.name_scope("Assign") as n, ops.colocate_with(handle):
+            # pylint: disable=g-backslash-continuation
+            with ops.name_scope("Assign") as n, \
+                 ops.colocate_with(None, ignore_existing=True), \
+                 ops.device(handle.device):
               # pylint: disable=protected-access
               initializer_op = (
                   gen_resource_variable_ops.assign_variable_op(
@@ -1574,7 +1579,8 @@ class ResourceVariable(BaseResourceVariable):
                           initial_value),
                       name=n))
               # pylint: enable=protected-access
-          with ops.name_scope("Read"), ops.colocate_with(handle):
+            # pylint: enable=g-backslash-continuation
+          with ops.name_scope("Read"):
             # Manually assign reads to the handle's device to avoid log
             # messages.
             with ops.device(handle.device):
@@ -1755,7 +1761,7 @@ class UninitializedVariable(BaseResourceVariable):
             name=name, graph_mode=self._in_graph_mode,
             extra_handle_data=extra_handle_data)
         if not context.executing_eagerly():
-          with ops.name_scope("Read"), ops.colocate_with(handle):
+          with ops.name_scope("Read"):
             # Manually assign reads to the handle's device to avoid log
             # messages.
             with ops.device(handle.device):
@@ -1775,7 +1781,7 @@ class UninitializedVariable(BaseResourceVariable):
         synchronization=synchronization, aggregation=aggregation)
 
 
-pywrap_tensorflow.TFE_Py_RegisterResourceVariableType(ResourceVariable)
+_pywrap_utils.RegisterType("ResourceVariable", ResourceVariable)
 math_ops._resource_variable_type = ResourceVariable  # pylint: disable=protected-access
 
 

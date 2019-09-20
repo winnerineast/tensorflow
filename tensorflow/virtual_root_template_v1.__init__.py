@@ -75,7 +75,6 @@ _top_level_modules = [
     "tensorflow.compiler",
     "tensorflow.lite",
     "tensorflow.keras",
-    "tensorflow.contrib",
     "tensorflow.compat",
     "tensorflow.summary",  # tensorboard
     "tensorflow.examples",
@@ -98,32 +97,39 @@ for _m in _top_level_modules:
 # We still need all the names that are toplevel on tensorflow_core
 from tensorflow_core import *
 
-# We also need to bring in keras if available in tensorflow_core
-# Above import * doesn't import it as __all__ is updated before keras is hooked
-try:
-  from tensorflow_core import keras
-except ImportError as e:
-  pass
-
-# Similarly for estimator, but only if this file is not read via a
-# import tensorflow_estimator (same reasoning as above when forwarding estimator
-# separatedly from the rest of the top level modules)
-if not _root_estimator:
-  try:
-    from tensorflow_core import estimator
-  except ImportError as e:
-    pass
-
-# And again for tensorboard (comes as summary)
-try:
-  from tensorflow_core import summary
-except ImportError as e:
-  pass
-
 # In V1 API we need to print deprecation messages
 from tensorflow.python.util import deprecation_wrapper as _deprecation
 if not isinstance(_sys.modules[__name__], _deprecation.DeprecationWrapper):
   _sys.modules[__name__] = _deprecation.DeprecationWrapper(
       _sys.modules[__name__], "")
 
+# These should not be visible in the main tf module.
+try:
+  del core
+except NameError:
+  pass
+
+try:
+  del python
+except NameError:
+  pass
+
+try:
+  del compiler
+except NameError:
+  pass
+
+try:
+  del tools
+except NameError:
+  pass
+
+try:
+  del examples
+except NameError:
+  pass
+
+# Manually patch keras and estimator so tf.keras and tf.estimator work
+keras = _sys.modules["tensorflow.keras"]
+if not _root_estimator: estimator = _sys.modules["tensorflow.estimator"]
 # LINT.ThenChange(//tensorflow/virtual_root_template_v2.__init__.py.oss)

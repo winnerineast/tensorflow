@@ -15,7 +15,6 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/gpu/nccl_all_reduce_thunk.h"
 
-#if GOOGLE_CUDA
 #include <chrono>  // NOLINT (required by TF interfaces)
 #include <memory>
 #include <string>
@@ -37,7 +36,6 @@ limitations under the License.
 #include "tensorflow/core/lib/core/blocking_counter.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/stream_executor/cuda/cuda_activation.h"
-#endif
 
 namespace xla {
 namespace gpu {
@@ -62,14 +60,9 @@ namespace gpu {
 // destroyed.
 
 /* static */ bool NcclAllReduceThunk::NcclIsEnabled() {
-#if GOOGLE_CUDA
-  return true;
-#else
-  return false;
-#endif
+  return true;  // Skylark selects this source file if NCCL is enabled.
 }
 
-#if GOOGLE_CUDA
 namespace {
 
 using tensorflow::BlockingCounter;
@@ -177,13 +170,13 @@ class NcclComm {
 // * Only ops with the same opcode can communicate with each other.  At the
 //   moment we only support kAllReduce, so we don't check for this explicitly.
 //
-// * For cross-module all-reduces (i.e. instr->all_reduce_id().has_value()),
-//   only ops with the same value for all_reduce_id() can communicate with each
+// * For cross-module all-reduces (i.e. instr->channel_id().has_value()),
+//   only ops with the same value for channel_id() can communicate with each
 //   other.
 //
 // * For cross-replica (i.e. same-module) all-reduces (i.e.
-//   !all_reduce_id().has_value()), only ops from the same module (as identified
-//   by its unique_id()) can communicate with each other.
+//   !channel_id().has_value()), only ops from the same module (as
+//   identified by its unique_id()) can communicate with each other.
 //
 struct RendezvousKey {
   enum AllReduceKind {
@@ -196,8 +189,8 @@ struct RendezvousKey {
                          const HloAllReduceInstruction* instr)
       : run_id(run_id), participating_replicas(participating_replicas) {
     std::tie(all_reduce_kind, op_id) =
-        instr->all_reduce_id().has_value()
-            ? std::make_pair(kCrossModule, instr->all_reduce_id().value())
+        instr->channel_id().has_value()
+            ? std::make_pair(kCrossModule, instr->channel_id().value())
             : std::make_pair(
                   kCrossReplica,
                   static_cast<int64>(instr->GetModule()->unique_id()));
@@ -726,36 +719,6 @@ Status NcclAllReduceThunk::ExecuteOnStream(const ExecuteParams& params) {
 }
 
 NcclAllReduceThunk::~NcclAllReduceThunk() {}
-
-#else
-
-Status NcclAllReduceThunk::ExecuteOnStream(const ExecuteParams& params) {
-  return Unimplemented(
-      "NCCL support is not available: this binary was not built with a CUDA "
-      "compiler, which is necessary to build the NCCL source library.");
-}
-
-NcclAllReduceThunk::~NcclAllReduceThunk() = default;
-
-/*static*/ absl::flat_hash_set<int>
-NcclAllReduceThunk::DevicesWithOpenNcclChannels() {
-  return {};
-}
-
-struct NcclAllReduceThunk::AuxData {};
-
-NcclAllReduceThunk::NcclAllReduceThunk(
-    int64 replica_count, int64 element_count,
-    const BufferAllocation::Slice& source_buffer,
-    const BufferAllocation::Slice& destination_buffer,
-    const HloInstruction* all_reduce)
-    : Thunk(Thunk::kNcclAllReduce, all_reduce),
-      replica_count_(replica_count),
-      element_count_(element_count),
-      source_buffer_(source_buffer),
-      destination_buffer_(destination_buffer) {}
-
-#endif  // GOOGLE_CUDA
 
 }  // namespace gpu
 }  // namespace xla

@@ -224,7 +224,7 @@ const char kShare[] = "Share";
 const char kFinish[] = "Finish";
 
 // CallSequence records a sequence of Alloc/Free/Finish calls.
-using CallSequence = std::vector<std::pair<string, const BufferValue*>>;
+using CallSequence = std::vector<std::pair<string, const HloValue*>>;
 
 // HeapCallRecorder is a dummy heap algorithm that simply records its calls.
 class HeapCallRecorder : public HeapAlgorithm {
@@ -232,7 +232,7 @@ class HeapCallRecorder : public HeapAlgorithm {
   explicit HeapCallRecorder(CallSequence* calls) : calls_(calls) {}
   ~HeapCallRecorder() override {}
 
-  void Alloc(const BufferValue* buffer, int64 size) override {
+  void Alloc(const HloValue* buffer, int64 size) override {
     calls_->emplace_back(kAlloc, buffer);
     // Instead of assigning a real offset, we set the cardinality of the Alloc
     // call.  This isn't a valid assignment, but allows us to easily test for
@@ -241,7 +241,7 @@ class HeapCallRecorder : public HeapAlgorithm {
     result_.chunk_map.emplace(buffer, Chunk{offset, size});
   }
 
-  void ShareWith(const BufferValue* buffer, const BufferValue* shared,
+  void ShareWith(const HloValue* buffer, const HloValue* shared,
                  int64 size) override {
     calls_->emplace_back(kShare, buffer);
     // Instead of assigning a real offset, we set the cardinality of the Alloc
@@ -250,7 +250,7 @@ class HeapCallRecorder : public HeapAlgorithm {
     const int64 offset = result_.chunk_map[shared].offset;
     result_.chunk_map.emplace(buffer, Chunk{offset, size});
   }
-  void Free(const BufferValue* buffer, int64 size) override {
+  void Free(const HloValue* buffer, int64 size) override {
     calls_->emplace_back(kFree, buffer);
   }
   Result Finish() override {
@@ -268,30 +268,25 @@ class HeapCallRecorder : public HeapAlgorithm {
 // sequence against an expected sequence.
 class HeapSimulatorTracker {
  public:
-  // Constructor for testing a single entry computation.
-  HeapSimulatorTracker(
-      const string& name, std::unique_ptr<HloComputation> computation,
+  explicit HeapSimulatorTracker(
+      std::unique_ptr<HloModule> module,
       const std::vector<HloInstruction*>& instruction_sequence,
-      const std::vector<HloInstruction*>& must_alias_set = {}) {
+      const std::vector<HloInstruction*>& must_alias_set = {},
+      const HloDataflowAnalysis::CanShareBuffer& can_share_buffer = nullptr) {
+    module_ = std::move(module);
+    Init(instruction_sequence, can_share_buffer);
+  }
+
+  // Constructor for testing a single entry computation.
+  explicit HeapSimulatorTracker(
+      const string& name, std::unique_ptr<HloComputation> entry_computation,
+      const std::vector<HloInstruction*>& instruction_sequence,
+      const std::vector<HloInstruction*>& must_alias_set = {},
+      const HloDataflowAnalysis::CanShareBuffer& can_share_buffer = nullptr) {
     HloModuleConfig config;
     module_ = absl::make_unique<HloModule>(name, config);
-    module_->AddEntryComputation(std::move(computation));
-    alias_analysis_ = HloAliasAnalysis::Run(module_.get()).ValueOrDie();
-    // Since we're only tracking the sequence of Alloc/Free calls, the actual
-    // size of the buffers doesn't matter, so we always return 0.  We rely on
-    // the secondary sorting criteria of DecreasingSizeRunsHeap to sort calls
-    // by buffer id, for determinism in the tests.
-    auto zero_size = [](const BufferValue& buffer) { return 0; };
-    auto algorithm = absl::make_unique<HeapCallRecorder>(&actual_calls_);
-    BufferValueFlatSet must_alias_buffer_value_set;
-
-    HeapSimulator::Options options;
-    options.must_alias_sets = {must_alias_buffer_value_set};
-    result_ =
-        HeapSimulator::Run(std::move(algorithm), *module_->entry_computation(),
-                           HloInstructionSequence(instruction_sequence),
-                           *alias_analysis_, zero_size, options)
-            .ConsumeValueOrDie();
+    module_->AddEntryComputation(std::move(entry_computation));
+    Init(instruction_sequence, can_share_buffer);
   }
 
   explicit HeapSimulatorTracker(const string& name) {
@@ -331,20 +326,36 @@ class HeapSimulatorTracker {
   HloModule* module() { return module_.get(); }
 
   // Returns the buffer defined at the given instruction and index.
-  const BufferValue* BufferAt(const HloInstruction* instruction,
-                              const ShapeIndex& index) const {
+  const HloValue* BufferAt(const HloInstruction* instruction,
+                           const ShapeIndex& index) const {
     return &alias_analysis_->dataflow_analysis().GetUniqueValueAt(instruction,
                                                                   index);
   }
 
   int64 OffsetAt(const HloInstruction* instruction, const ShapeIndex& index) {
-    const BufferValue* buffer = BufferAt(instruction, index);
+    const HloValue* buffer = BufferAt(instruction, index);
     return result_.chunk_map.at(buffer).offset;
   }
 
   // Ensures the expected sequence of Alloc/Free/Finish calls was performed.
   void ExpectCallSequence(const CallSequence& expected) const {
-    EXPECT_EQ(expected, actual_calls_);
+    auto to_string = [](const CallSequence& sequence) {
+      std::string output;
+      for (int64 i = 0; i < sequence.size(); ++i) {
+        auto pair = sequence.at(i);
+        absl::StrAppendFormat(&output, "%d", i);
+        absl::StrAppendFormat(&output, " :%s", pair.first);
+        if (pair.second != nullptr) {
+          absl::StrAppendFormat(&output, " - %s{%s}\n",
+                                pair.second->instruction()->name(),
+                                pair.second->index().ToString());
+        }
+      }
+      return output;
+    };
+    EXPECT_EQ(expected, actual_calls_) << "Expected:\n"
+                                       << to_string(expected) << " \nActual:\n"
+                                       << to_string(actual_calls_) << "\n";
   }
 
   // Ensures the buffers defined by the respective (instruction,index) pairs are
@@ -360,6 +371,27 @@ class HeapSimulatorTracker {
   }
 
  private:
+  void Init(const std::vector<HloInstruction*>& instruction_sequence,
+            const HloDataflowAnalysis::CanShareBuffer& can_share_buffer) {
+    // Since we're only tracking the sequence of Alloc/Free calls, the actual
+    // size of the buffers doesn't matter, so we always return 0.  We rely on
+    // the secondary sorting criteria of DecreasingSizeRunsHeap to sort calls
+    // by buffer id, for determinism in the tests.
+    auto zero_size = [](const BufferValue& buffer) { return 0; };
+    auto algorithm = absl::make_unique<HeapCallRecorder>(&actual_calls_);
+
+    alias_analysis_ =
+        HloAliasAnalysis::Run(module_.get(), can_share_buffer).ValueOrDie();
+
+    HeapSimulator::Options options;
+
+    result_ =
+        HeapSimulator::Run(std::move(algorithm), *module_->entry_computation(),
+                           HloInstructionSequence(instruction_sequence),
+                           *alias_analysis_, zero_size, options)
+            .ConsumeValueOrDie();
+  }
+
   std::unique_ptr<HloModule> module_;
   std::unique_ptr<HloAliasAnalysis> alias_analysis_;
   CallSequence actual_calls_;
@@ -444,8 +476,8 @@ TEST_F(HeapSimulatorTest, MultiplyAdd) {
   tracker.ExpectCallSequence({
       {kAlloc, tracker.BufferAt(paramA, {})},
       {kAlloc, tracker.BufferAt(paramX, {})},
-      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(paramY, {})},
+      {kAlloc, tracker.BufferAt(mul, {})},
       {kFree, tracker.BufferAt(mul, {})},
       {kShare, tracker.BufferAt(add, {})},
       // All params and outputs are freed at the end.
@@ -456,6 +488,142 @@ TEST_F(HeapSimulatorTest, MultiplyAdd) {
       {kFinish, nullptr},
   });
   tracker.ExpectSharedBuffers(add, {}, mul, {});
+}
+
+TEST_F(HeapSimulatorTest, FusionOutputsOnlyShareOnce) {
+  // Test that only one output of a fusion node will be shared with its operand.
+  auto can_share_buffer =
+      [](const HloInstruction* instr, const HloInstruction* operand,
+         const ShapeIndex& user_index) -> absl::optional<bool> {
+    if (instr->opcode() == HloOpcode::kFusion) {
+      return true;
+    }
+    return false;
+  };
+
+  HloModuleConfig config;
+  auto module = absl::make_unique<HloModule>(TestName(), config);
+
+  auto builder = HloComputation::Builder(TestName());
+  auto paramA = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, f32vec4_, "paramA"));
+  auto negate = builder.AddInstruction(
+      HloInstruction::CreateUnary(f32vec4_, HloOpcode::kNegate, paramA));
+
+  // The fusion node has two outputs, both are eligible for being reused with
+  // operand.
+  auto fusion_builder = HloComputation::Builder("simple_two_way_forwarding");
+  {
+    auto param = fusion_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, f32vec4_, "x"));
+    fusion_builder.AddInstruction(HloInstruction::CreateTuple({param, param}));
+  }
+  auto fusion_computation =
+      module->AddEmbeddedComputation(fusion_builder.Build());
+
+  auto fusion = builder.AddInstruction(HloInstruction::CreateFusion(
+      ShapeUtil::MakeTupleShape({f32vec4_, f32vec4_}),
+      HloInstruction::FusionKind::kLoop, {negate}, fusion_computation));
+
+  auto element0 = builder.AddInstruction(
+      HloInstruction::CreateGetTupleElement(f32scalar_, fusion, 0));
+
+  auto element1 = builder.AddInstruction(
+      HloInstruction::CreateGetTupleElement(f32scalar_, fusion, 1));
+
+  auto negate0 = builder.AddInstruction(
+      HloInstruction::CreateUnary(f32vec4_, HloOpcode::kNegate, element0));
+  auto negate1 = builder.AddInstruction(
+      HloInstruction::CreateUnary(f32vec4_, HloOpcode::kNegate, element1));
+
+  builder.AddInstruction(HloInstruction::CreateBinary(f32vec4_, HloOpcode::kAdd,
+                                                      negate0, negate1));
+
+  module->AddEntryComputation(builder.Build());
+  HeapSimulatorTracker tracker(
+      std::move(module),
+      {paramA, negate, fusion, element0, element1, negate0, negate1}, {},
+      can_share_buffer);
+  tracker.ExpectCallSequence({
+      {kAlloc, tracker.BufferAt(paramA, {})},
+      {kAlloc, tracker.BufferAt(negate, {})},
+      {kAlloc, tracker.BufferAt(fusion, {})},
+      {kFree, tracker.BufferAt(negate, {})},
+      {kShare, tracker.BufferAt(fusion, {0})},
+      {kAlloc, tracker.BufferAt(fusion, {1})},
+      {kFree, tracker.BufferAt(fusion, {})},
+      {kAlloc, tracker.BufferAt(negate0, {})},
+      {kFree, tracker.BufferAt(fusion, {0})},
+      {kFree, tracker.BufferAt(negate0, {})},
+      {kAlloc, tracker.BufferAt(negate1, {})},
+      {kFree, tracker.BufferAt(fusion, {1})},
+      {kFree, tracker.BufferAt(negate1, {})},
+      {kFree, tracker.BufferAt(paramA, {})},
+      {kFinish, nullptr},
+  });
+}
+
+TEST_F(HeapSimulatorTest, FusionOutputsOnlyShareOnceOutputShortLived) {
+  // Test that only one output of a fusion node will be shared with its operand.
+  // This variant of the test has a fusion node that dies immediately.
+  auto can_share_buffer =
+      [](const HloInstruction* instr, const HloInstruction* operand,
+         const ShapeIndex& user_index) -> absl::optional<bool> {
+    if (instr->opcode() == HloOpcode::kFusion) {
+      return true;
+    }
+    return false;
+  };
+
+  HloModuleConfig config;
+  auto module = absl::make_unique<HloModule>(TestName(), config);
+
+  auto builder = HloComputation::Builder(TestName());
+  auto paramA = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, f32vec4_, "paramA"));
+  auto negate = builder.AddInstruction(
+      HloInstruction::CreateUnary(f32vec4_, HloOpcode::kNegate, paramA));
+
+  // The fusion node has two outputs, both are eligible for being reused with
+  // operand.
+  auto fusion_builder = HloComputation::Builder("simple_two_way_forwarding");
+  {
+    auto param = fusion_builder.AddInstruction(
+        HloInstruction::CreateParameter(0, f32vec4_, "x"));
+    fusion_builder.AddInstruction(HloInstruction::CreateTuple({param, param}));
+  }
+  auto fusion_computation =
+      module->AddEmbeddedComputation(fusion_builder.Build());
+
+  auto fusion = builder.AddInstruction(HloInstruction::CreateFusion(
+      ShapeUtil::MakeTupleShape({f32vec4_, f32vec4_}),
+      HloInstruction::FusionKind::kLoop, {negate}, fusion_computation));
+
+  auto element1 = builder.AddInstruction(
+      HloInstruction::CreateGetTupleElement(f32scalar_, fusion, 1));
+
+  auto negate1 = builder.AddInstruction(
+      HloInstruction::CreateUnary(f32vec4_, HloOpcode::kNegate, element1));
+
+  module->AddEntryComputation(builder.Build());
+  HeapSimulatorTracker tracker(std::move(module),
+                               {paramA, negate, fusion, element1, negate1}, {},
+                               can_share_buffer);
+  tracker.ExpectCallSequence({
+      {kAlloc, tracker.BufferAt(paramA, {})},
+      {kAlloc, tracker.BufferAt(negate, {})},
+      {kFree, tracker.BufferAt(negate, {})},
+      {kShare, tracker.BufferAt(fusion, {0})},
+      {kAlloc, tracker.BufferAt(fusion, {})},
+      {kAlloc, tracker.BufferAt(fusion, {1})},
+      {kFree, tracker.BufferAt(fusion, {0})},
+      {kFree, tracker.BufferAt(fusion, {})},
+      {kAlloc, tracker.BufferAt(negate1, {})},
+      {kFree, tracker.BufferAt(fusion, {1})},
+      {kFree, tracker.BufferAt(paramA, {})},
+      {kFree, tracker.BufferAt(negate1, {})},
+      {kFinish, nullptr},
+  });
 }
 
 TEST_F(HeapSimulatorTest, BufferReusedOnce) {
@@ -518,8 +686,8 @@ TEST_F(HeapSimulatorTest, MultiplyDot) {
   tracker.ExpectCallSequence({
       {kAlloc, tracker.BufferAt(paramA, {})},
       {kAlloc, tracker.BufferAt(paramX, {})},
-      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(paramY, {})},
+      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(dot, {})},
       // All params and outputs are freed at the end.
       {kFree, tracker.BufferAt(mul, {})},
@@ -556,8 +724,8 @@ TEST_F(HeapSimulatorTest, MultiplyDotAdd) {
   tracker.ExpectCallSequence({
       {kAlloc, tracker.BufferAt(paramA, {})},
       {kAlloc, tracker.BufferAt(paramX, {})},
-      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(paramY, {})},
+      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(dot, {})},
       {kFree, tracker.BufferAt(mul, {})},
       {kFree, tracker.BufferAt(dot, {})},
@@ -598,8 +766,8 @@ TEST_F(HeapSimulatorTest, MultiplyDotDot) {
   tracker.ExpectCallSequence({
       {kAlloc, tracker.BufferAt(paramA, {})},
       {kAlloc, tracker.BufferAt(paramX, {})},
-      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(paramY, {})},
+      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(dot0, {})},
       {kFree, tracker.BufferAt(mul, {})},  // mul no longer used
       {kAlloc, tracker.BufferAt(dot1, {})},
@@ -642,8 +810,8 @@ TEST_F(HeapSimulatorTest, MultiplyDotDotTuple) {
   tracker.ExpectCallSequence({
       {kAlloc, tracker.BufferAt(paramA, {})},
       {kAlloc, tracker.BufferAt(paramX, {})},
-      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(paramY, {})},
+      {kAlloc, tracker.BufferAt(mul, {})},
       {kAlloc, tracker.BufferAt(dot0, {})},
       {kFree, tracker.BufferAt(mul, {})},  // mul no longer used
       {kAlloc, tracker.BufferAt(dot1, {})},
@@ -779,20 +947,20 @@ class HeapAlgorithmTestBase : public ::testing::Test {
   }
   ~HeapAlgorithmTestBase() override {}
 
-  const BufferValue* buffer_a_;
-  const BufferValue* buffer_b_;
-  const BufferValue* buffer_c_;
-  const BufferValue* buffer_d_;
-  const BufferValue* buffer_e_;
-  const BufferValue* buffer_f_;
-  const BufferValue* buffer_g_;
-  const BufferValue* buffer_h_;
-  const BufferValue* buffer_i_;
+  const HloValue* buffer_a_;
+  const HloValue* buffer_b_;
+  const HloValue* buffer_c_;
+  const HloValue* buffer_d_;
+  const HloValue* buffer_e_;
+  const HloValue* buffer_f_;
+  const HloValue* buffer_g_;
+  const HloValue* buffer_h_;
+  const HloValue* buffer_i_;
 
  private:
-  // Create a dummy BufferValue to pass to the heap algorithm.
-  const BufferValue* DummyBufferValue() {
-    const BufferValue::Id id = buffers_.size();
+  // Create a dummy HloValue to pass to the heap algorithm.
+  const HloValue* DummyBufferValue() {
+    const HloValue::Id id = buffers_.size();
     auto const0 = builder_.AddInstruction(
         HloInstruction::CreateConstant(LiteralUtil::CreateR0<float>(1.0)));
     buffers_.emplace_back(
@@ -801,7 +969,7 @@ class HeapAlgorithmTestBase : public ::testing::Test {
   }
 
   HloComputation::Builder builder_;
-  std::vector<std::unique_ptr<BufferValue>> buffers_;
+  std::vector<std::unique_ptr<HloValue>> buffers_;
 };
 
 class NoFragmentationStatsHeapTest : public HeapAlgorithmTestBase {};

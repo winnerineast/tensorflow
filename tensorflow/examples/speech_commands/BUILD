@@ -45,6 +45,7 @@ py_library(
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow:tensorflow_py",
+        "//tensorflow/lite/experimental/microfrontend:audio_microfrontend_py",
         "//third_party/py/numpy",
         "@six_archive//:six",
     ],
@@ -61,6 +62,7 @@ tf_py_test(
     ],
     tags = [
         "no_pip",  # b/131330719
+        "v1only",  # uses contrib
     ],
 )
 
@@ -97,6 +99,7 @@ tf_py_test(
     ],
     tags = [
         "no_pip",  # b/131330719
+        "v1only",  # uses contrib
     ],
 )
 
@@ -143,6 +146,7 @@ tf_py_test(
     ],
     tags = [
         "no_pip",  # b/131330719
+        "v1only",  # uses contrib
     ],
 )
 
@@ -186,6 +190,7 @@ tf_py_test(
     ],
     tags = [
         "no_pip",  # b/131330719
+        "v1only",  # uses contrib
     ],
 )
 
@@ -229,6 +234,7 @@ tf_py_test(
     ],
     tags = [
         "no_pip",  # b/131330719
+        "v1only",  # uses contrib
     ],
 )
 
@@ -283,6 +289,7 @@ tf_py_test(
     ],
     tags = [
         "no_pip",  # b/131330719
+        "v1only",  # uses contrib
     ],
 )
 

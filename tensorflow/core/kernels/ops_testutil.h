@@ -61,7 +61,7 @@ inline void SetOutputAttrs(OpKernelContext::Params* params,
     attr.set_on_host(on_host);
     attrs->push_back(attr);
   }
-  params->output_attr_array = gtl::vector_as_array(attrs);
+  params->output_attr_array = attrs->data();
 }
 
 }  // namespace test
@@ -78,7 +78,7 @@ class OpsTestBase : public ::testing::Test {
     CHECK(device) << "Could not create CPU device";
 
     device_ = device.get();
-    device_mgr_ = absl::make_unique<DeviceMgr>(std::move(device));
+    device_mgr_ = absl::make_unique<StaticDeviceMgr>(std::move(device));
 
     allocator_ = device_->GetAllocator(AllocatorAttributes());
 
@@ -175,6 +175,10 @@ class OpsTestBase : public ::testing::Test {
     // Make sure the old OpKernelContext is deleted before the Params
     // it was using.
     context_.reset(nullptr);
+
+    // Delete the output copies from previous runs.
+    gtl::STLDeleteElements(&managed_outputs_);
+    managed_outputs_.resize(0);
 
     params_.reset(new OpKernelContext::Params);
     params_->device = device_;

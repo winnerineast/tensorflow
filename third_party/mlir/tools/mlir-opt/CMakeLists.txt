@@ -17,13 +17,15 @@ target_link_libraries(MLIRMlirOptLib ${LIB_LIBS})
 
 set(LIBS
   MLIRAffineOps
+  MLIRAffineToStandard
   MLIRLoopsToGPU
   MLIRAnalysis
-  MLIRControlFlowToCFG
+  MLIRLoopToStandard
   MLIREDSC
   MLIRFxpMathOps
   MLIRGPU
   MLIRGPUtoNVVMTransforms
+  MLIRGPUtoROCDLTransforms
   MLIRGPUtoSPIRVTransforms
   MLIRLinalg
   MLIRLLVMIR
@@ -34,12 +36,15 @@ set(LIBS
   MLIRPass
   MLIRQuantizerTransforms
   MLIRQuantOps
+  MLIRROCDLIR
   MLIRSPIRV
-  MLIRSPIRVConversion
+  MLIRStandardToSPIRVTransforms
+  MLIRSPIRVTransforms
   MLIRStandardOps
   MLIRStandardToLLVM
   MLIRTransforms
   MLIRTestDialect
+  MLIRTestIR
   MLIRTestPass
   MLIRTestTransforms
   MLIRSupport

@@ -18,6 +18,8 @@ limitations under the License.
 #include "absl/strings/str_split.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SMLoc.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/ToolOutputFile.h"
 #include "mlir/IR/MLIRContext.h"  // TF:local_config_mlir
 #include "mlir/Support/FileUtilities.h"  // TF:local_config_mlir
@@ -47,9 +49,16 @@ static llvm::cl::opt<bool> import_saved_model(
 // NOLINTNEXTLINE
 static llvm::cl::opt<std::string> saved_model_tags(
     "tf-savedmodel-tags",
-    llvm::cl::desc("Tags used to indicate which MeataGraphDef to import, "
+    llvm::cl::desc("Tags used to indicate which MetaGraphDef to import, "
                    "separated by ','"),
     llvm::cl::init("serve"));
+
+// NOLINTNEXTLINE
+static llvm::cl::opt<std::string> saved_model_exported_names(
+    "tf-savedmodel-exported-names",
+    llvm::cl::desc("Names to export from SavedModel, separated by ','. Empty "
+                   "(the default) means export all."),
+    llvm::cl::init(""));
 
 int main(int argc, char** argv) {
   tensorflow::InitMlir y(&argc, &argv);
@@ -81,9 +90,12 @@ int main(int argc, char** argv) {
   if (import_saved_model) {
     std::unordered_set<std::string> tags =
         absl::StrSplit(saved_model_tags, ',');
+    std::vector<std::string> exported_names =
+        absl::StrSplit(saved_model_exported_names, ',', absl::SkipEmpty());
 
-    auto module = tensorflow::SavedModelToMlirImport(input_filename, tags,
-                                                     debug_info_file, &context);
+    auto module = tensorflow::SavedModelToMlirImport(
+        input_filename, tags, absl::Span<std::string>(exported_names),
+        &context);
     if (!module) return 1;
 
     module->print(output->os());
@@ -95,8 +107,11 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    if (failed(
-            (*requested_translation)(std::move(input), output->os(), &context)))
+    llvm::SourceMgr source_mgr;
+    source_mgr.AddNewSourceBuffer(std::move(input), llvm::SMLoc());
+    mlir::SourceMgrDiagnosticHandler diagnostic_handler(source_mgr, &context);
+
+    if (failed((*requested_translation)(source_mgr, output->os(), &context)))
       return 1;
   }
 

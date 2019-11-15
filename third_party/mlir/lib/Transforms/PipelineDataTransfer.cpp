@@ -73,7 +73,6 @@ static unsigned getTagMemRefPos(Operation &dmaInst) {
 static bool doubleBuffer(Value *oldMemRef, AffineForOp forOp) {
   auto *forBody = forOp.getBody();
   OpBuilder bInner(forBody, forBody->begin());
-  bInner.setInsertionPoint(forBody, forBody->begin());
 
   // Doubles the shape with a leading dimension extent of 2.
   auto doubleShape = [&](MemRefType oldMemRefType) -> MemRefType {
@@ -83,8 +82,8 @@ static bool doubleBuffer(Value *oldMemRef, AffineForOp forOp) {
     newShape[0] = 2;
     std::copy(oldShape.begin(), oldShape.end(), newShape.begin() + 1);
     auto newMemRefType =
-        bInner.getMemRefType(newShape, oldMemRefType.getElementType(), {},
-                             oldMemRefType.getMemorySpace());
+        MemRefType::get(newShape, oldMemRefType.getElementType(), {},
+                        oldMemRefType.getMemorySpace());
     return newMemRefType;
   };
 
@@ -110,8 +109,8 @@ static bool doubleBuffer(Value *oldMemRef, AffineForOp forOp) {
   // Create 'iv mod 2' value to index the leading dimension.
   auto d0 = bInner.getAffineDimExpr(0);
   int64_t step = forOp.getStep();
-  auto modTwoMap = bInner.getAffineMap(/*dimCount=*/1, /*symbolCount=*/0,
-                                       {d0.floorDiv(step) % 2});
+  auto modTwoMap = AffineMap::get(/*dimCount=*/1, /*symbolCount=*/0,
+                                  {d0.floorDiv(step) % 2});
   auto ivModTwoOp = bInner.create<AffineApplyOp>(forOp.getLoc(), modTwoMap,
                                                  forOp.getInductionVar());
 
@@ -130,8 +129,7 @@ static bool doubleBuffer(Value *oldMemRef, AffineForOp forOp) {
     return false;
   }
   // Insert the dealloc op right after the for loop.
-  bOuter.setInsertionPoint(forInst->getBlock(),
-                           std::next(Block::iterator(forInst)));
+  bOuter.setInsertionPointAfter(forInst);
   bOuter.create<DeallocOp>(forInst->getLoc(), newMemRef);
 
   return true;
@@ -220,7 +218,7 @@ static void findMatchingStartFinishInsts(
       // We can double buffer regardless of dealloc's outside the loop.
       if (isa<DeallocOp>(user))
         continue;
-      if (!forOp.getBody()->findAncestorInstInBlock(*user)) {
+      if (!forOp.getBody()->findAncestorOpInBlock(*user)) {
         LLVM_DEBUG(llvm::dbgs()
                        << "can't pipeline: buffer is live out of loop\n";);
         escapingUses = true;

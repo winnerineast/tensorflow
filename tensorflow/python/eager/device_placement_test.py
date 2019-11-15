@@ -18,13 +18,17 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
+from tensorflow.python.eager import def_function
 from tensorflow.python.eager import remote
 from tensorflow.python.eager import test
+from tensorflow.python.framework import config
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
+from tensorflow.python.ops import variables
 
 
 class SoftDevicePlacementTest(test.TestCase):
@@ -84,6 +88,23 @@ class SoftDevicePlacementTest(test.TestCase):
     # We don't support nested device placement right now.
     self.assertIn('GPU:0', c.device)
 
+  @test_util.run_gpu_only
+  def testGradientPlacement(self):
+    with ops.device('GPU:0'):
+      x = variables.Variable(1.0)
+    with ops.device('CPU:0'):
+      y = variables.Variable(1.0)
+
+    with backprop.GradientTape() as tape:
+      with ops.device('GPU:0'):
+        x1 = constant_op.constant(2.0) * x
+      with ops.device('CPU:0'):
+        y1 = constant_op.constant(2.0) * y
+      z = x1 + y1
+    grads = tape.gradient(z, [x, y])
+    self.assertIn('GPU:0', grads[0].device)
+    self.assertIn('CPU:0', grads[1].device)
+
 
 class ClusterPlacementTest(test.TestCase):
 
@@ -109,6 +130,33 @@ class ClusterPlacementTest(test.TestCase):
         c = a + b
         del c
       self.assertIn('unknown device', cm.exception.message)
+
+  def testUnknownDeviceInFunctionReturnUnknowDevice(self):
+
+    @def_function.function
+    def f():
+      with ops.device('GPU:42'):
+        return constant_op.constant(1) + constant_op.constant(2)
+
+    gpus = config.list_physical_devices('GPU')
+    if not gpus:
+      self.assertIn('CPU:0', f().device)
+    else:
+      self.assertIn('GPU:0', f().device)
+
+  def testUnknownDeviceInFunction(self):
+
+    @def_function.function
+    def f():
+      with ops.device('GPU:42'):
+        a = constant_op.constant(1) + constant_op.constant(2)
+      return a + constant_op.constant(2)
+
+    gpus = config.list_physical_devices('GPU')
+    if not gpus:
+      self.assertIn('CPU:0', f().device)
+    else:
+      self.assertIn('GPU:0', f().device)
 
 
 if __name__ == '__main__':

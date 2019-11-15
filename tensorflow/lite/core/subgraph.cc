@@ -102,7 +102,7 @@ TfLiteQuantizationParams GetLegacyQuantization(
   }
 
   auto* affine_quantization =
-      reinterpret_cast<TfLiteAffineQuantization*>(quantization.params);
+      static_cast<TfLiteAffineQuantization*>(quantization.params);
   if (!affine_quantization || !affine_quantization->scale ||
       !affine_quantization->zero_point ||
       affine_quantization->scale->size != 1 ||
@@ -162,6 +162,7 @@ Subgraph::Subgraph(ErrorReporter* error_reporter,
     : external_contexts_(external_contexts),
       error_reporter_(error_reporter),
       next_execution_plan_index_to_prepare_(0),
+      next_execution_plan_index_to_plan_allocation_(0),
       subgraphs_(subgraphs),
       resource_variables_(resource_variables) {
   context_.impl_ = static_cast<void*>(this);
@@ -269,7 +270,7 @@ TfLiteDelegateParams* CreateDelegateParams(TfLiteDelegate* delegate,
 
   // Step 2: Allocate the memory.
   // Use `char*` for conveniently step through the allocated space by bytes.
-  char* allocation = reinterpret_cast<char*>(malloc(allocation_size));
+  char* allocation = static_cast<char*>(malloc(allocation_size));
 
   // Step 3: Fill all data structures structures.
   TfLiteDelegateParams* params =
@@ -478,6 +479,7 @@ TfLiteStatus Subgraph::BytesRequired(TfLiteType type, const int* dims,
 }
 
 TfLiteStatus Subgraph::AllocateTensors() {
+  TFLITE_SCOPED_TAGGED_DEFAULT_PROFILE(profiler_.get(), "AllocateTensors");
   if (!consistent_) {
     ReportError("AllocateTensors() called on inconsistent model.");
     return kTfLiteError;
@@ -495,6 +497,7 @@ TfLiteStatus Subgraph::AllocateTensors() {
   }
 
   next_execution_plan_index_to_prepare_ = 0;
+  next_execution_plan_index_to_plan_allocation_ = 0;
   if (memory_planner_) {
     TF_LITE_ENSURE_STATUS(memory_planner_->ResetAllocations());
   }
@@ -569,9 +572,8 @@ TfLiteStatus Subgraph::AddNodeWithParameters(
   if (init_data) {
     node.user_data = OpInit(*registration, init_data, init_data_size);
   } else {
-    node.user_data =
-        OpInit(*registration,
-               reinterpret_cast<const char*>(builtin_data_deleter.get()), 0);
+    node.user_data = OpInit(
+        *registration, static_cast<const char*>(builtin_data_deleter.get()), 0);
   }
 
   node.builtin_data = builtin_data_deleter.release();
@@ -681,7 +683,6 @@ TfLiteStatus Subgraph::PrepareOpsStartingAt(
 }
 
 TfLiteStatus Subgraph::PrepareOpsAndTensors() {
-  //  for (const auto& tensor : graph_info_
   if (!memory_planner_) {
     memory_planner_.reset(new ArenaPlanner(
         &context_, std::unique_ptr<GraphInfo>(new InterpreterInfo(this)),
@@ -693,10 +694,13 @@ TfLiteStatus Subgraph::PrepareOpsAndTensors() {
 
   TF_LITE_ENSURE_STATUS(PrepareOpsStartingAt(
       next_execution_plan_index_to_prepare_, &last_exec_plan_index_prepared));
+  next_execution_plan_index_to_prepare_ = last_exec_plan_index_prepared + 1;
 
   TF_LITE_ENSURE_STATUS(memory_planner_->ExecuteAllocations(
-      next_execution_plan_index_to_prepare_, last_exec_plan_index_prepared));
-  next_execution_plan_index_to_prepare_ = last_exec_plan_index_prepared + 1;
+      next_execution_plan_index_to_plan_allocation_,
+      last_exec_plan_index_prepared));
+  next_execution_plan_index_to_plan_allocation_ =
+      last_exec_plan_index_prepared + 1;
 
   return kTfLiteOk;
 }
@@ -735,7 +739,7 @@ TfLiteStatus Subgraph::Invoke() {
     TfLiteNode& node = nodes_and_registration_[node_index].first;
     const TfLiteRegistration& registration =
         nodes_and_registration_[node_index].second;
-    TFLITE_SCOPED_OPERATOR_PROFILE(profiler_, node_index);
+    TFLITE_SCOPED_OPERATOR_PROFILE(profiler_.get(), node_index);
 
     // TODO(ycling): This is an extra loop through inputs to check if the data
     // need to be copied from Delegate buffer to raw memory, which is often not
@@ -771,6 +775,22 @@ TfLiteStatus Subgraph::Invoke() {
     if (tensor_resized_since_op_invoke_ &&
         HasDynamicTensor(context_, node.outputs)) {
       next_execution_plan_index_to_prepare_ = execution_plan_index + 1;
+
+      // This happens when an intermediate dynamic tensor is resized.
+      // We don't have to prepare all the ops, but we need to recompute
+      // the allocation plan.
+      //
+      // This is a workaround for b/127354079. It relies on the property that
+      // ArenaPlanner's behavior is deterministic. A better solution is being
+      // able to "Rewind" to a specific index in ArenaPlanner.
+      // TODO(b/127354079): Improve ArenaPlanner and remove this mechanism.
+      if (next_execution_plan_index_to_plan_allocation_ >
+          next_execution_plan_index_to_prepare_) {
+        next_execution_plan_index_to_plan_allocation_ = 0;
+        if (memory_planner_) {
+          TF_LITE_ENSURE_STATUS(memory_planner_->ResetAllocations());
+        }
+      }
     }
   }
 

@@ -35,6 +35,7 @@ limitations under the License.
 #include "mlir/Pass/PassRegistry.h"  // TF:local_config_mlir
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_executor.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace mlir {
@@ -108,7 +109,7 @@ llvm::Optional<IslandOp> GetResultCandidateToMergeWith(IslandOp island) {
   Block& graph_body = llvm::cast<GraphOp>(graph_op).GetBody();
   for (Value* result : island.outputs()) {
     for (Operation* user : result->getUsers()) {
-      Operation* def = graph_body.findAncestorInstInBlock(*user);
+      Operation* def = graph_body.findAncestorOpInBlock(*user);
       DCHECK_NE(def, nullptr);
       if (!candidate || def->isBeforeInBlock(candidate)) candidate = def;
     }
@@ -148,7 +149,7 @@ llvm::SmallVector<IslandResult, 8> GetNewIslandResultsAndForwardResults(
     Value* inner_op_result = std::get<0>(ret_vals);
     Value* island_result = std::get<1>(ret_vals);
     for (auto& use : llvm::make_early_inc_range(island_result->getUses())) {
-      if (child_body.findAncestorInstInBlock(*use.getOwner())) {
+      if (child_body.findAncestorOpInBlock(*use.getOwner())) {
         // Forward result from inner op.
         use.set(inner_op_result);
       } else if (!result_captured) {
@@ -282,8 +283,51 @@ bool MergeIslandWithResult(IslandOp parent) {
   return true;
 }
 
+// Takes the inputs to tf_executor.fetch, make a new island that just yields
+// them, and replace the fetch's input operands with the new yielded values.
+//
+// This allows our def-use based island coarsening algorithm to merge
+// islands that independently feed into a fetch.
+void InsertDummyIslandForFetch(FetchOp fetch) {
+  llvm::SmallVector<Value*, 4> data_fetches;
+  llvm::SmallVector<Type, 4> data_types;
+  llvm::SmallVector<Value*, 4> control_fetches;
+  for (auto value : fetch.fetches()) {
+    if (value->getType().isa<ControlType>()) {
+      control_fetches.push_back(value);
+    } else {
+      data_fetches.push_back(value);
+      data_types.push_back(value->getType());
+    }
+  }
+  auto island = OpBuilder(fetch).create<IslandOp>(
+      fetch.getLoc(), data_types,
+      /*control=*/ControlType::get(fetch.getContext()),
+      /*controlInputs=*/control_fetches);
+  island.body().push_back(new Block);
+  OpBuilder(&island.GetBody())
+      .create<YieldOp>(fetch.getLoc(), llvm::to_vector<4>(data_fetches));
+  const int fetch_control_idx = data_fetches.size();
+  for (int i = 0, e = fetch.getNumOperands(); i < e; i++) {
+    // The fetch could have multiple control operands (all at the end of its
+    // operand list). We replace them all with the island's single control
+    // operand.
+    if (i <= fetch_control_idx) {
+      fetch.setOperand(i, island.getResult(i));
+    } else {
+      fetch.getOperation()->eraseOperand(fetch.getNumOperands() - 1);
+    }
+  }
+}
+
 void ExecutorIslandCoarsening::runOnFunction() {
+  if (VLOG_IS_ON(1))
+    tensorflow::DumpMlirOpToFile("mlir_executor_island_coarsening_before",
+                                 getFunction());
+
   getFunction().walk([](GraphOp graph) {
+    InsertDummyIslandForFetch(graph.GetFetch());
+
     Block& graph_body = graph.GetBody();
 
     bool updated = false;
@@ -304,6 +348,10 @@ void ExecutorIslandCoarsening::runOnFunction() {
       }
     } while (updated);
   });
+
+  if (VLOG_IS_ON(1))
+    tensorflow::DumpMlirOpToFile("mlir_executor_island_coarsening_after",
+                                 getFunction());
 }
 
 }  // namespace

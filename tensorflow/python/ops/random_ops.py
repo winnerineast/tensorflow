@@ -19,7 +19,9 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+import six
 
+from tensorflow.python.compat import compat
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -51,10 +53,10 @@ def random_normal(shape,
 
   Args:
     shape: A 1-D integer Tensor or Python array. The shape of the output tensor.
-    mean: A 0-D Tensor or Python value of type `dtype`. The mean of the normal
-      distribution.
-    stddev: A 0-D Tensor or Python value of type `dtype`. The standard deviation
-      of the normal distribution.
+    mean: A Tensor or Python value of type `dtype`, broadcastable with `stddev`.
+      The mean of the normal distribution.
+    stddev: A Tensor or Python value of type `dtype`, broadcastable with `mean`.
+      The standard deviation of the normal distribution.
     dtype: The type of the output.
     seed: A Python integer. Used to create a random seed for the distribution.
       See
@@ -208,26 +210,25 @@ def random_uniform(shape,
   Examples:
 
   >>> tf.random.uniform(shape=[2])
-  <tf.Tensor: id=..., shape=(2,), dtype=float32, numpy=array([..., ...],
-  dtype=float32)>
+  <tf.Tensor: shape=(2,), dtype=float32, numpy=array([..., ...], dtype=float32)>
   >>> tf.random.uniform(shape=[], minval=-1., maxval=0.)
-  <tf.Tensor: id=..., shape=(), dtype=float32, numpy=-...>
+  <tf.Tensor: shape=(), dtype=float32, numpy=-...>
   >>> tf.random.uniform(shape=[], minval=5, maxval=10, dtype=tf.int64)
-  <tf.Tensor: id=..., shape=(), dtype=int64, numpy=...>
+  <tf.Tensor: shape=(), dtype=int64, numpy=...>
 
   The `seed` argument produces a deterministic sequence of tensors across
   multiple calls. To repeat that sequence, use `tf.random.set_seed`:
 
   >>> tf.random.set_seed(5)
   >>> tf.random.uniform(shape=[], maxval=3, dtype=tf.int32, seed=10)
-  <tf.Tensor: id=..., shape=(), dtype=int32, numpy=2>
+  <tf.Tensor: shape=(), dtype=int32, numpy=2>
   >>> tf.random.uniform(shape=[], maxval=3, dtype=tf.int32, seed=10)
-  <tf.Tensor: id=..., shape=(), dtype=int32, numpy=0>
+  <tf.Tensor: shape=(), dtype=int32, numpy=0>
   >>> tf.random.set_seed(5)
   >>> tf.random.uniform(shape=[], maxval=3, dtype=tf.int32, seed=10)
-  <tf.Tensor: id=..., shape=(), dtype=int32, numpy=2>
+  <tf.Tensor: shape=(), dtype=int32, numpy=2>
   >>> tf.random.uniform(shape=[], maxval=3, dtype=tf.int32, seed=10)
-  <tf.Tensor: id=..., shape=(), dtype=int32, numpy=0>
+  <tf.Tensor: shape=(), dtype=int32, numpy=0>
 
   Without `tf.random.set_seed` but with a `seed` argument is specified, small
   changes to function graphs or previously executed operations will change the
@@ -235,11 +236,12 @@ def random_uniform(shape,
 
   Args:
     shape: A 1-D integer Tensor or Python array. The shape of the output tensor.
-    minval: A 0-D Tensor or Python value of type `dtype`. The lower bound on the
-      range of random values to generate (inclusive).  Defaults to 0.
-    maxval: A 0-D Tensor or Python value of type `dtype`. The upper bound on the
-      range of random values to generate (exclusive). Defaults to 1 if `dtype`
-      is floating point.
+    minval: A Tensor or Python value of type `dtype`, broadcastable with
+      `maxval`. The lower bound on the range of random values to generate
+      (inclusive).  Defaults to 0.
+    maxval: A Tensor or Python value of type `dtype`, broadcastable with
+      `minval`. The upper bound on the range of random values to generate
+      (exclusive). Defaults to 1 if `dtype` is floating point.
     dtype: The type of the output: `float16`, `float32`, `float64`, `int32`,
       or `int64`.
     seed: A Python integer. Used in combination with `tf.random.set_seed` to
@@ -262,15 +264,39 @@ def random_uniform(shape,
     maxval = 1
   with ops.name_scope(name, "random_uniform", [shape, minval, maxval]) as name:
     shape = tensor_util.shape_tensor(shape)
-    minval = ops.convert_to_tensor(minval, dtype=dtype, name="min")
-    maxval = ops.convert_to_tensor(maxval, dtype=dtype, name="max")
-    seed1, seed2 = random_seed.get_seed(seed)
-    if dtype.is_integer:
-      result = gen_random_ops.random_uniform_int(
-          shape, minval, maxval, seed=seed1, seed2=seed2, name=name)
+    # TODO(b/143079601): Remove this once the compatible window is passed.
+    if compat.forward_compatible(2019, 12, 3):
+      # In case of [0,1) floating results, minval and maxval is unused.
+      minval_is_zero = isinstance(minval, six.integer_types +
+                                  (float,)) and minval == 0
+      maxval_is_one = isinstance(maxval, six.integer_types +
+                                 (float,)) and maxval == 1
+      if not minval_is_zero or not maxval_is_one or dtype.is_integer:
+        minval = ops.convert_to_tensor(minval, dtype=dtype, name="min")
+        maxval = ops.convert_to_tensor(maxval, dtype=dtype, name="max")
+      seed1, seed2 = random_seed.get_seed(seed)
+      if dtype.is_integer:
+        result = gen_random_ops.random_uniform_int(
+            shape, minval, maxval, seed=seed1, seed2=seed2, name=name)
+      else:
+        result = gen_random_ops.random_uniform(
+            shape, dtype, seed=seed1, seed2=seed2)
+        if minval_is_zero:
+          if not maxval_is_one:
+            result = result * maxval
+        else:
+          result = math_ops.add(result * (maxval - minval), minval, name=name)
     else:
-      rnd = gen_random_ops.random_uniform(shape, dtype, seed=seed1, seed2=seed2)
-      result = math_ops.add(rnd * (maxval - minval), minval, name=name)
+      minval = ops.convert_to_tensor(minval, dtype=dtype, name="min")
+      maxval = ops.convert_to_tensor(maxval, dtype=dtype, name="max")
+      seed1, seed2 = random_seed.get_seed(seed)
+      if dtype.is_integer:
+        result = gen_random_ops.random_uniform_int(
+            shape, minval, maxval, seed=seed1, seed2=seed2, name=name)
+      else:
+        rnd = gen_random_ops.random_uniform(
+            shape, dtype, seed=seed1, seed2=seed2)
+        result = math_ops.add(rnd * (maxval - minval), minval, name=name)
     # TODO(b/132092188): C++ shape inference inside functional ops does not
     # cross FuncGraph boundaries since that information is only available in
     # python. So we manually get the static shape using
@@ -513,7 +539,9 @@ def random_gamma(shape,
     alpha = ops.convert_to_tensor(alpha, name="alpha", dtype=dtype)
     beta = ops.convert_to_tensor(
         beta if beta is not None else 1, name="beta", dtype=dtype)
-    alpha_broadcast = alpha + array_ops.zeros_like(beta)
+    broadcast_shape = array_ops.broadcast_dynamic_shape(
+        array_ops.shape(alpha), array_ops.shape(beta))
+    alpha_broadcast = array_ops.broadcast_to(alpha, broadcast_shape)
     seed1, seed2 = random_seed.get_seed(seed)
     result = math_ops.maximum(
         np.finfo(alpha.dtype.as_numpy_dtype).tiny,

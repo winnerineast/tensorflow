@@ -31,6 +31,7 @@ limitations under the License.
 #include "mlir/IR/Module.h"  // TF:local_config_mlir
 #include "mlir/IR/Operation.h"  // TF:local_config_mlir
 #include "mlir/IR/OperationSupport.h"  // TF:local_config_mlir
+#include "mlir/IR/StandardTypes.h"  // TF:local_config_mlir
 #include "mlir/IR/TypeUtilities.h"  // TF:local_config_mlir
 #include "mlir/Support/DebugStringHelper.h"  // TF:local_config_mlir
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
@@ -112,12 +113,23 @@ Status ConvertAttribute(const mlir::StringAttr& attr, AttrValue* value) {
   return Status::OK();
 }
 
+Status ConvertAttribute(mlir::Type type, AttrValue* value) {
+  DataType dtype;
+  TF_RETURN_IF_ERROR(ConvertToDataType(type, &dtype));
+  value->set_type(dtype);
+  return Status::OK();
+}
+
+Status ConvertAttribute(const mlir::TypeAttr& type, AttrValue* value) {
+  return ConvertAttribute(type.getValue(), value);
+}
+
 Status ConvertAttribute(const mlir::UnitAttr& attr, AttrValue* value) {
   value->clear_value();
   return Status::OK();
 }
 
-Status ConvertAttribute(const mlir::SymbolRefAttr& attr, AttrValue* value) {
+Status ConvertAttribute(const mlir::FlatSymbolRefAttr& attr, AttrValue* value) {
   value->mutable_func()->set_name(attr.getValue());
   return Status::OK();
 }
@@ -151,19 +163,19 @@ Status ConvertAttribute(const mlir::ArrayAttr& attr, AttrValue* value) {
       TensorProto tensor;
       TF_RETURN_IF_ERROR(ConvertToTensorProto(attr, &tensor));
       *list->add_tensor() = tensor;
-    } else if (auto attr = a.dyn_cast<mlir::SymbolRefAttr>()) {
-      AttrValue attrVal;
-      TF_RETURN_IF_ERROR(ConvertAttribute(attr, &attrVal));
-      *list->add_func() = attrVal.func();
+    } else if (auto attr = a.dyn_cast<mlir::FlatSymbolRefAttr>()) {
+      AttrValue attr_val;
+      TF_RETURN_IF_ERROR(ConvertAttribute(attr, &attr_val));
+      *list->add_func() = attr_val.func();
     } else if (auto attr = a.dyn_cast<mlir::TypeAttr>()) {
+      AttrValue attr_val;
       // For type attributes, we only propagate the element type.
       mlir::Type elt_type = attr.getValue();
       if (auto shaped_type = elt_type.dyn_cast<mlir::ShapedType>()) {
         elt_type = shaped_type.getElementType();
       }
-      DataType dtype;
-      TF_RETURN_IF_ERROR(ConvertToDataType(elt_type, &dtype));
-      list->add_type(dtype);
+      TF_RETURN_IF_ERROR(ConvertAttribute(elt_type, &attr_val));
+      list->add_type(attr_val.type());
     } else {
       return errors::Unimplemented("Unhandled attribute!");
     }
@@ -271,7 +283,7 @@ StatusOr<std::unique_ptr<NodeDef>> GetOperationNodeDef(
   TF_RETURN_WITH_CONTEXT_IF_ERROR(
       ConvertAttributes(inst->getAttrs(), attrs_to_ignore,
                         node_def->mutable_attr()),
-      "TensorFlow node name: ", name.str());
+      "while converting attributes for node: ", name.str());
 
   // Add the node debug info.
   TF_RETURN_IF_ERROR(ConvertLocation(
@@ -306,7 +318,7 @@ Status ConvertAttributes(
     AttrValue value;
     switch (attr.getKind()) {
       case mlir::StandardAttributes::SymbolRef: {
-        auto func_attr = attr.cast<mlir::SymbolRefAttr>();
+        auto func_attr = attr.cast<mlir::FlatSymbolRefAttr>();
         value.mutable_func()->set_name(func_attr.getValue());
         func_call_attrs[string(name)] = value;
         continue;
@@ -336,13 +348,21 @@ Status ConvertAttributes(
         TF_RETURN_IF_ERROR(
             ConvertAttribute(attr.cast<mlir::ElementsAttr>(), &value));
         break;
+      case mlir::StandardAttributes::Type:
+        TF_RETURN_IF_ERROR(
+            ConvertAttribute(attr.cast<mlir::TypeAttr>(), &value));
+        break;
       case mlir::StandardAttributes::Unit:
         TF_RETURN_IF_ERROR(
             ConvertAttribute(attr.cast<mlir::UnitAttr>(), &value));
         break;
-      // AffineMap and Type kinds are not implemented.
+      // AffineMap kind is not implemented.
+      case mlir::StandardAttributes::AffineMap:
+        return errors::Unimplemented("AffineMap attribute (needed for '",
+                                     name_strref, "') unimplemented");
       default:
-        return errors::Unimplemented("Unhandled attribute kind");
+        return errors::Unimplemented("Unhandled attribute kind for attribute '",
+                                     name_strref, '\'');
     }
     // According to the NodeDef proto definition, an attribute name from the
     // input TensorFlow GraphDef shouldn't contain '.'. If it does appear in
@@ -366,11 +386,11 @@ Status ConvertAttributes(
 
 // Sets type attribute with the given name. If the attribute already exists with
 // a different value, returns an error.
-Status SetAttribute(absl::string_view name, mlir::Type type,
-                    AttrValueMap* values) {
+Status SetTypeAttribute(absl::string_view name, mlir::Type type,
+                        AttrValueMap* values) {
   DataType dtype;
   TF_RETURN_IF_ERROR(ConvertScalarTypeToDataType(type, &dtype));
-
+  if (tensorflow::IsRefType(dtype)) dtype = tensorflow::RemoveRefType(dtype);
   AttrValue value;
   value.set_type(dtype);
 
@@ -382,6 +402,54 @@ Status SetAttribute(absl::string_view name, mlir::Type type,
                                      name, "' attribute but found ",
                                      DataType_Name(actual_dtype));
     }
+  }
+  return Status::OK();
+}
+
+Status SetShapeAttribute(absl::string_view name, mlir::ShapedType shaped_type,
+                         AttrValueMap* values) {
+  tensorflow::TensorShapeProto tshape;
+  AttrValue value;
+  if (shaped_type.hasRank()) {
+    for (auto dim : shaped_type.getShape()) tshape.add_dim()->set_size(dim);
+  } else {
+    tshape.set_unknown_rank(true);
+  }
+  *value.mutable_shape() = tshape;
+
+  auto result = values->insert({string(name), value});
+  if (!result.second) {
+    // This should be extremely rare as it means we are adding the same
+    // attribute multiple times/have some redundancy in representing this
+    // attribute.
+    TensorShapeProto actual_shape = result.first->second.shape();
+    // Just check via string output as we shouldn't get here and if we do they
+    // should be trivially the same, else fail.
+    if (actual_shape.ShortDebugString() != tshape.ShortDebugString()) {
+      return errors::InvalidArgument("Expected ", tshape.ShortDebugString(),
+                                     " '", name, "' attribute but found ",
+                                     actual_shape.ShortDebugString());
+    }
+  }
+  return Status::OK();
+}
+
+Status SetSizeAttribute(absl::string_view name, size_t size,
+                        AttrValueMap* values) {
+  AttrValue value;
+  value.set_i(size);
+
+  auto result = values->insert({string(name), value});
+  if (!result.second) {
+    // This should be extremely rare as it means we are adding the same
+    // attribute multiple times/have some redundancy in representing this
+    // attribute.
+    int64 actual_size = result.first->second.i();
+    // Just check via string output as we shouldn't get here and if we do they
+    // should be trivially the same, else fail.
+    if (actual_size != size)
+      return errors::InvalidArgument("Expected '", name, "' attribute to be ",
+                                     size, " but found ", actual_size);
   }
   return Status::OK();
 }

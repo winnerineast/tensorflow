@@ -2285,7 +2285,7 @@ bool OutputIsPermutationOfOperandElements(HloInstruction* instruction,
 // "operand". Precondition: "operand" is an operand of "instruction".
 bool OutputIsSubsetOfOperandElements(HloInstruction* instruction,
                                      HloInstruction* operand) {
-  std::vector<int64> operand_indices = instruction->OperandIndices(operand);
+  const auto operand_indices = instruction->OperandIndices(operand);
   CHECK(!operand_indices.empty());
   if (operand_indices.size() != 1) {
     return false;
@@ -2407,6 +2407,24 @@ Status AlgebraicSimplifierVisitor::HandleBroadcast(HloInstruction* broadcast) {
         broadcast,
         HloInstruction::CreateBroadcast(
             broadcast->shape(), operand->mutable_operand(0), new_dimensions));
+  }
+  if (options_.is_layout_sensitive()) {
+    return Status::OK();
+  }
+  if (ShapeUtil::HasDegenerateDimensions(operand->shape())) {
+    auto new_operand =
+        operand->parent()->AddInstruction(HloInstruction::CreateReshape(
+            ShapeUtil::DropDegenerateDimensions(operand->shape()), operand));
+    std::vector<int64> new_dims;
+    new_dims.reserve(new_operand->shape().rank());
+    for (int64 i = 0; i < operand->shape().rank(); ++i) {
+      if (operand->shape().dimensions(i) != 1) {
+        new_dims.push_back(dims[i]);
+      }
+    }
+    return ReplaceWithNewInstruction(
+        broadcast, HloInstruction::CreateBroadcast(broadcast->shape(),
+                                                   new_operand, new_dims));
   }
   return Status::OK();
 }

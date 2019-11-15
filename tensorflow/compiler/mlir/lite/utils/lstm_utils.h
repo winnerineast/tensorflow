@@ -31,16 +31,16 @@ limitations under the License.
 namespace mlir {
 namespace TFL {
 
-constexpr char kLstmCellSimple[] = "LSTMCellSimple";
+constexpr char kLstmCellSimple[] = "lingvo.LSTMCellSimple";
 constexpr char kLayerNormalizedLstmCellSimple[] =
-    "LayerNormalizedLstmCellSimple";
+    "lingvo.LayerNormalizedLstmCellSimple";
 
 // A utility class that enables the conversion of the LSTMCellSimple composite
 // op into a fused TFL LSTM op. The fused op is contained within a FuncOp
 // that also contains other supporting ops needed to construct the operands for
 // the fused op. The caller provides the containing FuncOp as input with
 // arguments specifying the input, weight, projection and bias.
-// The weight, pprojection, bias and layer norm scale all need to be
+// The weight, projection, bias and layer norm scale all need to be
 // RankedTensorType.
 // This class sets the layer norm coefficients to NoneType.
 class ConvertLSTMCellSimpleToFusedLSTM {
@@ -60,15 +60,16 @@ class ConvertLSTMCellSimpleToFusedLSTM {
       const ConvertLSTMCellSimpleToFusedLSTM&) = delete;
   virtual ~ConvertLSTMCellSimpleToFusedLSTM() {}
 
-  // verify input func op arguments and initialize internal state.
-  virtual LogicalResult Initialize();
-
   virtual llvm::StringRef GetCompositeOpName() { return kLstmCellSimple; }
 
   // Rewrite the func body with constructed fused lstm.
-  void RewriteFunc();
+  LogicalResult RewriteFunc();
+
+  int GetNumInputs() { return n_input_; }
 
  protected:
+  // verify input func op arguments and initialize internal state.
+  virtual LogicalResult Initialize();
   void UpdateFuncSignature();
   void GenerateFusedOpOperands();
 
@@ -166,7 +167,7 @@ class ConvertLSTMCellSimpleToFusedLSTM {
 // fused op is contained within a FuncOp that also contains other supporting ops
 // needed to construct the operands for the fused op. The caller provides the
 // containing FuncOp as input with arguments specifying the input, weight,
-// projection, bias and layer norm scale. The weight, pprojection, bias and
+// projection, bias and layer norm scale. The weight, projection, bias and
 // layer norm scale all need to be RankedTensorType.
 // This class overrides the layer norm coefficient setters from the base class.
 class ConvertLayerNormalizedLSTMCellSimpleToFusedLSTM
@@ -190,9 +191,9 @@ class ConvertLayerNormalizedLSTMCellSimpleToFusedLSTM
     return kLayerNormalizedLstmCellSimple;
   }
 
+ protected:
   LogicalResult Initialize() override;
 
- protected:
   void SetCellLayerNormCoefficients() override;
   void SetInputLayerNormCoefficients() override;
   void SetForgetLayerNormCoefficients() override;

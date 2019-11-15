@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_slice.h"
 #include "tensorflow/core/kernels/conv_2d.h"
 #include "tensorflow/core/kernels/conv_grad_ops.h"
+#include "tensorflow/core/kernels/conv_grad_shape_utils.h"
 #include "tensorflow/core/kernels/fill_functor.h"
 #ifdef TENSORFLOW_USE_LIBXSMM_CONVOLUTIONS
 #include "tensorflow/core/kernels/xsmm_conv2d.h"
@@ -614,12 +615,14 @@ class Conv2DCustomBackpropFilterOp : public OpKernel {
   REGISTER_KERNEL_BUILDER(Name("Conv2DBackpropFilter")                        \
                               .Device(DEVICE_CPU)                             \
                               .Label("custom")                                \
-                              .TypeConstraint<T>("T"),                        \
+                              .TypeConstraint<T>("T")                         \
+                              .AttrConstraint("data_format", "NHWC"),         \
                           Conv2DCustomBackpropFilterOp<CPUDevice, T>);        \
   REGISTER_KERNEL_BUILDER(Name("Conv2DBackpropFilter")                        \
                               .Device(DEVICE_CPU)                             \
                               .Label("eigen_tensor")                          \
-                              .TypeConstraint<T>("T"),                        \
+                              .TypeConstraint<T>("T")                         \
+                              .AttrConstraint("data_format", "NHWC"),         \
                           Conv2DBackpropFilterOp<CPUDevice, T>);
 
 TF_CALL_half(REGISTER_CPU_KERNELS);

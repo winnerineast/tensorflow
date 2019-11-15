@@ -78,6 +78,12 @@ public:
   virtual void printOptionalAttrDict(ArrayRef<NamedAttribute> attrs,
                                      ArrayRef<StringRef> elidedAttrs = {}) = 0;
 
+  /// If the specified operation has attributes, print out an attribute
+  /// dictionary prefixed with 'attributes'.
+  virtual void
+  printOptionalAttrDictWithKeyword(ArrayRef<NamedAttribute> attrs,
+                                   ArrayRef<StringRef> elidedAttrs = {}) = 0;
+
   /// Print the entire operation with the default generic assembly form.
   virtual void printGenericOp(Operation *op) = 0;
 
@@ -132,6 +138,12 @@ public:
       os << ')';
     }
   }
+
+  /// Print the given string as a symbol reference, i.e. a form representable by
+  /// a SymbolRefAttr. A symbol reference is represented as a string prefixed
+  /// with '@'. The reference is surrounded with ""'s and escaped if it has any
+  /// special or non-printable characters in it.
+  virtual void printSymbolName(StringRef symbolRef) = 0;
 
 private:
   OpAsmPrinter(const OpAsmPrinter &) = delete;
@@ -334,15 +346,32 @@ public:
 
   /// Parse a named dictionary into 'result' if it is present.
   virtual ParseResult
-  parseOptionalAttributeDict(SmallVectorImpl<NamedAttribute> &result) = 0;
+  parseOptionalAttrDict(SmallVectorImpl<NamedAttribute> &result) = 0;
+
+  /// Parse a named dictionary into 'result' if the `attributes` keyword is
+  /// present.
+  virtual ParseResult
+  parseOptionalAttrDictWithKeyword(SmallVectorImpl<NamedAttribute> &result) = 0;
 
   //===--------------------------------------------------------------------===//
   // Identifier Parsing
   //===--------------------------------------------------------------------===//
 
+  /// Parse an @-identifier and store it (without the '@' symbol) in a string
+  /// attribute named 'attrName'.
+  ParseResult parseSymbolName(StringAttr &result, StringRef attrName,
+                              SmallVectorImpl<NamedAttribute> &attrs) {
+    if (failed(parseOptionalSymbolName(result, attrName, attrs)))
+      return emitError(getCurrentLocation())
+             << "expected valid '@'-identifier for symbol name";
+    return success();
+  }
+
+  /// Parse an optional @-identifier and store it (without the '@' symbol) in a
+  /// string attribute named 'attrName'.
   virtual ParseResult
-  parseSymbolName(StringAttr &result, StringRef attrName,
-                  SmallVectorImpl<NamedAttribute> &attrs) = 0;
+  parseOptionalSymbolName(StringAttr &result, StringRef attrName,
+                          SmallVectorImpl<NamedAttribute> &attrs) = 0;
 
   //===--------------------------------------------------------------------===//
   // Operand Parsing

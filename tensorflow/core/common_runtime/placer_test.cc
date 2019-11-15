@@ -37,13 +37,13 @@ limitations under the License.
 #include "tensorflow/core/graph/graph_constructor.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
 #include "tensorflow/core/graph/graph_def_builder_util.h"
-#include "tensorflow/core/lib/core/error_codes.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/config.pb.h"
+#include "tensorflow/core/protobuf/error_codes.pb.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
 namespace tensorflow {
@@ -355,7 +355,7 @@ class PlacerTest : public ::testing::Test {
 class SoftPlacementPlacerTest : public PlacerTest,
                                 public ::testing::WithParamInterface<bool> {};
 
-INSTANTIATE_TEST_SUITE_P(, SoftPlacementPlacerTest,
+INSTANTIATE_TEST_SUITE_P(All, SoftPlacementPlacerTest,
                          ::testing::Values(false, true),
                          ::testing::PrintToStringParamName());
 
@@ -1210,6 +1210,27 @@ TEST_F(PlacerTest, TestMultipleColocationGroups) {
         ops::UnaryOp("TestRelu", input,
                      b.opts().WithName("foo").WithAttr(
                          "_class", {"loc:@in", "loc:@colocated_1"}));
+    CHECK(colocated_with_input);
+    CHECK(colocated_with_input_and_other);
+    TF_EXPECT_OK(BuildGraph(b, &g));
+  }
+
+  TF_EXPECT_OK(Place(&g));
+  EXPECT_COLOCATED(g, "in", "colocated_1");
+  EXPECT_COLOCATED(g, "in", "foo");
+}
+
+TEST_F(PlacerTest, TestChainColocation) {
+  Graph g(OpRegistry::Global());
+  {  // Scope for temporary variables used to construct g.
+    GraphDefBuilder b(GraphDefBuilder::kFailImmediately);
+    Node* input = ops::SourceOp("TestInput", b.opts().WithName("in"));
+    Node* colocated_with_input = ops::UnaryOp(
+        "TestRelu", input,
+        b.opts().WithName("colocated_1").WithAttr("_class", {"loc:@in"}));
+    Node* colocated_with_input_and_other = ops::UnaryOp(
+        "TestRelu", input,
+        b.opts().WithName("foo").WithAttr("_class", {"loc:@colocated_1"}));
     CHECK(colocated_with_input);
     CHECK(colocated_with_input_and_other);
     TF_EXPECT_OK(BuildGraph(b, &g));

@@ -27,8 +27,7 @@
 #include "mlir/IR/Types.h"
 
 // Pull in all enum type definitions and utility function declarations
-#include "mlir/Dialect/SPIRV/SPIRVBitEnums.h.inc"
-#include "mlir/Dialect/SPIRV/SPIRVIntEnums.h.inc"
+#include "mlir/Dialect/SPIRV/SPIRVEnums.h.inc"
 
 #include <tuple>
 
@@ -59,11 +58,7 @@ class CompositeType : public Type {
 public:
   using Type::Type;
 
-  static bool classof(Type type) {
-    return (type.getKind() == TypeKind::Array ||
-            type.getKind() == TypeKind::Struct ||
-            type.getKind() == StandardTypes::Vector);
-  }
+  static bool classof(Type type);
 
   unsigned getNumElements() const;
 
@@ -178,9 +173,13 @@ public:
 
   static bool kindof(unsigned kind) { return kind == TypeKind::Struct; }
 
+  /// Construct a StructType with at least one member.
   static StructType get(ArrayRef<Type> memberTypes,
                         ArrayRef<LayoutInfo> layoutInfo = {},
                         ArrayRef<MemberDecorationInfo> memberDecorations = {});
+
+  /// Construct a struct with no members.
+  static StructType getEmpty(MLIRContext *context);
 
   unsigned getNumElements() const;
 

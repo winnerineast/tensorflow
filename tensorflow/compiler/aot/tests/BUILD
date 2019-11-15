@@ -35,7 +35,7 @@ py_binary(
     name = "make_test_graphs",
     testonly = 1,
     srcs = ["make_test_graphs.py"],
-    python_version = "PY2",
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow/core:protos_all_py",
@@ -50,6 +50,7 @@ py_binary(
         "//tensorflow/python:session",
         "//tensorflow/python:training",
         "//tensorflow/python:variables",
+        "@six_archive//:six",
     ],
 )
 
@@ -271,7 +272,7 @@ tf_cc_test(
         ":test_graph_tfvariable_sequential_updates",
         "//tensorflow/compiler/xla:shape_util",
         "//tensorflow/compiler/xla:test",
-        "//tensorflow/compiler/xla:xla_data_proto",
+        "//tensorflow/compiler/xla:xla_data_proto_cc",
         "//tensorflow/compiler/xla/service:hlo_profile_printer",
         "//tensorflow/core:lib",
         "//tensorflow/core:regexp_internal",

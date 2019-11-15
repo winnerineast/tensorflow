@@ -15,17 +15,14 @@ limitations under the License.
 
 // This is the operation definition file for LXLA.
 
-#ifdef LHLO_OPS
-#else
+#ifndef LHLO_OPS
 #define LHLO_OPS
 
-#ifdef OP_BASE
-#else
+#ifndef OP_BASE
 include "mlir/IR/OpBase.td"
 #endif // OP_BASE
 
-#ifdef HLO_OPS_BASE
-#else
+#ifndef HLO_OPS_BASE
 include "tensorflow/compiler/mlir/xla/ir/hlo_ops_base.td"
 #endif
 
@@ -126,25 +123,32 @@ def LHLO_MinOp : LHLO_BinaryElementwiseOp<"min", []>, BASE_HLO_MinOp;
 
 def LHLO_MulOp : LHLO_BinaryElementwiseOp<"mul", []>, BASE_HLO_MulOp;
 
+def LHLO_RemOp :
+      LHLO_BinaryElementwiseOp<"remainder", []>, BASE_HLO_RemOp;
+
 def LHLO_SubOp : LHLO_BinaryElementwiseOp<"sub", []>, BASE_HLO_SubOp;
 
 def LHLO_AndOp: LHLO_BinaryElementwiseOp<"and", []>, BASE_HLO_AndOp;
+
+def LHLO_OrOp: LHLO_BinaryElementwiseOp<"or", []>, BASE_HLO_OrOp;
 
 //===----------------------------------------------------------------------===//
 // XLA control flow op definitions.
 //===----------------------------------------------------------------------===//
 
 // TODO(b/139813999): specify required function signature in a type-safe way.
-def LHLO_ReduceOp: LHLO_Op<"reduce", [SameVariadicOperandSize]>, BASE_HLO_ReduceOp {
+def LHLO_ReduceOp: LHLO_Op<"reduce", [
+      SameVariadicOperandSize,
+      SingleBlockImplicitTerminator<"TerminatorOp">
+    ]>, BASE_HLO_ReduceOp {
   let arguments = (ins
     Variadic<LHLO_BufferOrTuple>:$operands,
     Variadic<LHLO_BufferOrTuple>:$init_values,
     Variadic<LHLO_BufferOrTuple>:$out,
-    // TODO(hinsu): Attach computation as a region similar to the
-    // xla_hlo.reduce op.
-    SymbolRefAttr:$computation,
     I64ElementsAttr:$dimensions
   );
+
+  let regions = (region SizedRegion<1>:$body);
 }
 //===----------------------------------------------------------------------===//
 // XLA tuple op definitions.
@@ -348,7 +352,7 @@ def FusionOp : LHLO_Op<"fusion", [SingleBlockImplicitTerminator<"TerminatorOp">]
 
   let skipDefaultBuilders = 1;
   let builders = [
-     OpBuilder<"Builder *builder, OperationState *result, "
+     OpBuilder<"Builder *builder, OperationState &result, "
                "ArrayRef<NamedAttribute> attributes">
    ];
 }

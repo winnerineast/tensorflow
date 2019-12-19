@@ -35,7 +35,6 @@ limitations under the License.
 #include "mlir/Pass/PassRegistry.h"  // TF:local_config_mlir
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_executor.h"
 #include "tensorflow/compiler/mlir/tensorflow/transforms/passes.h"
-#include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace mlir {
@@ -305,8 +304,7 @@ void InsertDummyIslandForFetch(FetchOp fetch) {
       /*control=*/ControlType::get(fetch.getContext()),
       /*controlInputs=*/control_fetches);
   island.body().push_back(new Block);
-  OpBuilder(&island.GetBody())
-      .create<YieldOp>(fetch.getLoc(), llvm::to_vector<4>(data_fetches));
+  OpBuilder(&island.GetBody()).create<YieldOp>(fetch.getLoc(), data_fetches);
   const int fetch_control_idx = data_fetches.size();
   for (int i = 0, e = fetch.getNumOperands(); i < e; i++) {
     // The fetch could have multiple control operands (all at the end of its
@@ -321,10 +319,6 @@ void InsertDummyIslandForFetch(FetchOp fetch) {
 }
 
 void ExecutorIslandCoarsening::runOnFunction() {
-  if (VLOG_IS_ON(1))
-    tensorflow::DumpMlirOpToFile("mlir_executor_island_coarsening_before",
-                                 getFunction());
-
   getFunction().walk([](GraphOp graph) {
     InsertDummyIslandForFetch(graph.GetFetch());
 
@@ -348,10 +342,6 @@ void ExecutorIslandCoarsening::runOnFunction() {
       }
     } while (updated);
   });
-
-  if (VLOG_IS_ON(1))
-    tensorflow::DumpMlirOpToFile("mlir_executor_island_coarsening_after",
-                                 getFunction());
 }
 
 }  // namespace

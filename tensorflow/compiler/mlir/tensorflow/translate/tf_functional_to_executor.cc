@@ -20,8 +20,6 @@ limitations under the License.
 #include "mlir/Pass/Pass.h"  // TF:local_config_mlir
 #include "mlir/Pass/PassRegistry.h"  // TF:local_config_mlir
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_executor.h"
-#include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
-#include "tensorflow/core/platform/logging.h"
 
 #define DEBUG_TYPE "tf-functional-to-executor"
 
@@ -48,10 +46,6 @@ struct FunctionalToExecutorDialectConversion
 }  // end anonymous namespace
 
 void FunctionalToExecutorDialectConversion::runOnFunction() {
-  if (VLOG_IS_ON(1))
-    tensorflow::DumpMlirOpToFile("mlir_functional_to_executor_before",
-                                 getFunction());
-
   if (getFunction().getBlocks().size() != 1) {
     LLVM_DEBUG(llvm::dbgs() << "Expect single block function, skip conversion "
                                "to tf_executor dialect\n");
@@ -73,8 +67,6 @@ void FunctionalToExecutorDialectConversion::runOnFunction() {
     LLVM_DEBUG(llvm::dbgs() << "Expect function to end with return\n");
     return;
   }
-  llvm::SmallVector<Value*, 4> args =
-      llvm::to_vector<4>(return_op.getOperands());
   // Build GraphOp.
   OpBuilder builder(&body, body.begin());
   auto graph_op = builder.create<tf_executor::GraphOp>(
@@ -85,10 +77,10 @@ void FunctionalToExecutorDialectConversion::runOnFunction() {
       loc, getFunction().getType().getResults(),
       tf_executor::ControlType::get(&getContext()), ArrayRef<Value*>());
   // Create Fetch.
-  auto to_fetch = llvm::to_vector<4>(island.getResults());
+  ValueRange to_fetch = island.getResults();
   if (to_fetch.size() != 1) {
     // Drop control result for fetch.
-    to_fetch.pop_back();
+    to_fetch = to_fetch.drop_back();
   }
   builder.create<tf_executor::FetchOp>(loc, to_fetch);
   // Build Island.
@@ -97,14 +89,10 @@ void FunctionalToExecutorDialectConversion::runOnFunction() {
       island.body().front().begin(), body.getOperations(), copy_range.begin(),
       copy_range.end());
   builder.setInsertionPointToEnd(&island.body().front());
-  builder.create<tf_executor::YieldOp>(loc, args);
+  builder.create<tf_executor::YieldOp>(loc, return_op.getOperands());
   for (auto item : llvm::enumerate(graph_op.getResults())) {
     return_op.setOperand(item.index(), item.value());
   }
-
-  if (VLOG_IS_ON(1))
-    tensorflow::DumpMlirOpToFile("mlir_functional_to_executor_after",
-                                 getFunction());
 }
 
 std::unique_ptr<OpPassBase<FuncOp>>

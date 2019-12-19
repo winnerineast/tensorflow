@@ -1392,10 +1392,10 @@ def _resize_image_with_pad_common(image, target_height, target_width,
     _, height, width, _ = _ImageDimensions(image, rank=4)
 
     # convert values to float, to ease divisions
-    f_height = math_ops.cast(height, dtype=dtypes.float64)
-    f_width = math_ops.cast(width, dtype=dtypes.float64)
-    f_target_height = math_ops.cast(target_height, dtype=dtypes.float64)
-    f_target_width = math_ops.cast(target_width, dtype=dtypes.float64)
+    f_height = math_ops.cast(height, dtype=dtypes.float32)
+    f_width = math_ops.cast(width, dtype=dtypes.float32)
+    f_target_height = math_ops.cast(target_height, dtype=dtypes.float32)
+    f_target_width = math_ops.cast(target_width, dtype=dtypes.float32)
 
     # Find the ratio by which the image must be adjusted
     # to fit within the target
@@ -1554,7 +1554,7 @@ def per_image_standardization(image):
     adjusted_stddev = math_ops.maximum(stddev, min_stddev)
 
     image -= image_mean
-    image = math_ops.div(image, adjusted_stddev, name=scope)
+    image = math_ops.divide(image, adjusted_stddev, name=scope)
     return convert_image_dtype(image, orig_dtype, saturate=True)
 
 
@@ -1712,7 +1712,9 @@ def adjust_contrast(images, contrast_factor):
 
 @tf_export('image.adjust_gamma')
 def adjust_gamma(image, gamma=1, gain=1):
-  """Performs Gamma Correction on the input image.
+  """Performs [Gamma Correction](http://en.wikipedia.org/wiki/Gamma_correction).
+
+  on the input image.
 
   Also known as Power Law Transform. This function converts the
   input images at first to float representation, then transforms them
@@ -1740,7 +1742,7 @@ def adjust_gamma(image, gamma=1, gain=1):
     For gamma less than 1, the histogram will shift towards right and
     the output image will be brighter than the input image.
   References:
-    [1] http://en.wikipedia.org/wiki/Gamma_correction
+    [Wikipedia](http://en.wikipedia.org/wiki/Gamma_correction)
   """
 
   with ops.name_scope(None, 'adjust_gamma', [image, gamma, gain]) as name:
@@ -1821,7 +1823,7 @@ def convert_image_dtype(image, dtype, saturate=False, name=None):
         # cause in.max to be mapped to above out.max but below out.max+1,
         # so that the output is safely in the supported range.
         scale = (scale_in + 1) // (scale_out + 1)
-        scaled = math_ops.div(image, scale)
+        scaled = math_ops.floordiv(image, scale)
 
         if saturate:
           return math_ops.saturate_cast(scaled, dtype, name=name)
@@ -1864,7 +1866,15 @@ def rgb_to_grayscale(images, name=None):
   Outputs a tensor of the same `DType` and rank as `images`.  The size of the
   last dimension of the output is 1, containing the Grayscale value of the
   pixels.
+  
+  ```python
+  >>> original = tf.constant([[[1.0, 2.0, 3.0]]])
+  >>> converted = tf.image.rgb_to_grayscale(original)
+  >>> print(converted.numpy())
+  [[[1.81...]]]
 
+  ```
+  
   Args:
     images: The RGB tensor to convert. The last dimension must have size 3 and
       should contain RGB values.
@@ -1894,7 +1904,17 @@ def grayscale_to_rgb(images, name=None):
   Outputs a tensor of the same `DType` and rank as `images`.  The size of the
   last dimension of the output is 3, containing the RGB value of the pixels.
   The input images' last dimension must be size 1.
+ 
+  ```python
+  >>> original = tf.constant([[[1.0], [2.0], [3.0]]])
+  >>> converted = tf.image.grayscale_to_rgb(original)
+  >>> print(converted.numpy())
+  [[[1. 1. 1.]
+    [2. 2. 2.]
+    [3. 3. 3.]]]
 
+  ```
+  
   Args:
     images: The Grayscale tensor to convert. The last dimension must be size 1.
     name: A name for the operation (optional).
@@ -2228,6 +2248,35 @@ tf_export(
     'image.extract_jpeg_shape',
     v1=['io.extract_jpeg_shape', 'image.extract_jpeg_shape'])(
         gen_image_ops.extract_jpeg_shape)
+
+
+@tf_export('image.encode_png')
+def encode_png(image, compression=-1, name=None):
+  r"""PNG-encode an image.
+
+  `image` is a 3-D uint8 or uint16 Tensor of shape `[height, width, channels]`
+  where `channels` is:
+
+  *   1: for grayscale.
+  *   2: for grayscale + alpha.
+  *   3: for RGB.
+  *   4: for RGBA.
+
+  The ZLIB compression level, `compression`, can be -1 for the PNG-encoder
+  default or a value from 0 to 9.  9 is the highest compression level,
+  generating the smallest output, but is slower.
+
+  Args:
+    image: A `Tensor`. Must be one of the following types: `uint8`, `uint16`.
+      3-D with shape `[height, width, channels]`.
+    compression: An optional `int`. Defaults to `-1`. Compression level.
+    name: A name for the operation (optional).
+
+  Returns:
+    A `Tensor` of type `string`.
+  """
+  return gen_image_ops.encode_png(
+      ops.convert_to_tensor(image), compression, name)
 
 
 @tf_export(
@@ -2943,6 +2992,14 @@ def rgb_to_yuv(images):
 
   Returns:
     images: tensor with the same shape as `images`.
+    
+  Usage Example:
+  ```python
+  >> import tensorflow as tf
+  >> x = tf.random.normal(shape=(256, 256, 3))
+  >> tf.image.rgb_to_yuv(x)
+  ```
+    
   """
   images = ops.convert_to_tensor(images, name='images')
   kernel = ops.convert_to_tensor(

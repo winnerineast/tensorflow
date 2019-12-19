@@ -189,35 +189,27 @@ GpuVersion GetGpuVersion(se::StreamExecutor* stream_exec) {
 // other dimensions are 1.  Return nullopt otherwise or when any of the bounds
 // is not constant.
 static absl::optional<int64> getLaunchBound(const mlir::gpu::KernelDim3& dim) {
-  bool bound_is_supported = true;
-
-  auto get_constant_or_report = [&bound_is_supported](
-                                    mlir::Operation* op,
-                                    mlir::StringRef name) -> int64 {
-    auto constant = llvm::dyn_cast_or_null<mlir::ConstantOp>(op);
-    if (!constant) {
-      op->emitError() << "bound " << name << " is not constant";
-      bound_is_supported = false;
-      return -1;
+  auto get_constant = [](mlir::Operation* op,
+                         mlir::StringRef name) -> absl::optional<int64> {
+    if (auto constant = llvm::dyn_cast_or_null<mlir::ConstantOp>(op)) {
+      return constant.value().cast<mlir::IntegerAttr>().getInt();
     }
-    return constant.value().cast<mlir::IntegerAttr>().getInt();
+    op->emitError() << "bound " << name << " is not constant";
+    return absl::nullopt;
   };
-  auto assert_constant_one = [&bound_is_supported, get_constant_or_report](
-                                 mlir::Operation* op, mlir::StringRef name) {
-    if (get_constant_or_report(op, name) != 1) {
-      op->emitError() << "bound " << name << " is not constant 1";
-      bound_is_supported = false;
-    }
-  };
-
-  auto dim_x = get_constant_or_report(dim.x->getDefiningOp(), "x");
-  assert_constant_one(dim.y->getDefiningOp(), "y");
-  assert_constant_one(dim.z->getDefiningOp(), "z");
-
-  if (!bound_is_supported) {
+  auto y_op = dim.y->getDefiningOp();
+  auto dim_y = get_constant(y_op, "y");
+  if (!dim_y.has_value() || dim_y.value() != 1) {
+    y_op->emitError() << "bound 'y' is not constant 1";
     return absl::nullopt;
   }
-  return dim_x;
+  auto z_op = dim.z->getDefiningOp();
+  auto dim_z = get_constant(z_op, "z");
+  if (!dim_z.has_value() || dim_z.value() != 1) {
+    z_op->emitError() << "bound 'z' is not constant 1";
+    return absl::nullopt;
+  }
+  return get_constant(dim.x->getDefiningOp(), "x");
 }
 
 using OperandToValueMap =
@@ -238,7 +230,7 @@ static StatusOr<std::vector<const HloInstruction*>> ComputeOperandToValueMap(
       has_failed = true;
       continue;
     }
-    // host_index is the argument positon to the surrounding function that
+    // host_index is the argument position to the surrounding function that
     // contains the launch. This index corresponds to HLO operand indices
     // by construction.
     auto host_index = launchop_operand->getArgNumber();
@@ -338,29 +330,43 @@ Status InsertBufferLoadPreduleIntoKernel(
       builder.create<mlir::LLVM::StoreOp>(loc, offset, structOffsetAddr);
       // Fill the shape.
       auto shape = operand->shape();
-      auto entry_type =
-          struct_type.getStructElementType(3).getArrayElementType();
-      // TODO(b/137624192) Pass in the descriptor to allow for dynamic shapes.
-      assert(shape.IsArray() && shape.is_static());
-      for (auto extent : llvm::enumerate(shape.dimensions())) {
-        auto index = builder.create<mlir::LLVM::ConstantOp>(
-            loc, offset_type, builder.getI64IntegerAttr(extent.index()));
-        auto shapeEntryPtr = builder.create<mlir::LLVM::GEPOp>(
-            loc, entry_type, descPtr,
-            llvm::ArrayRef<Value*>{zero, shapeIndex, index});
-        auto extentValue = builder.create<mlir::LLVM::ConstantOp>(
-            loc, entry_type, builder.getI64IntegerAttr(extent.value()));
-        builder.create<mlir::LLVM::StoreOp>(loc, extentValue, shapeEntryPtr);
-      }
-      // Finally, fill the strides with all ones.
-      entry_type = struct_type.getStructElementType(4).getArrayElementType();
-      for (int64 idx = 0; idx < shape.rank(); ++idx) {
-        auto indexValue = builder.create<mlir::LLVM::ConstantOp>(
-            loc, offset_type, builder.getI64IntegerAttr(idx));
-        auto strideEntryPtr = builder.create<mlir::LLVM::GEPOp>(
-            loc, entry_type, descPtr,
-            llvm::ArrayRef<Value*>{zero, strideIndex, indexValue});
-        builder.create<mlir::LLVM::StoreOp>(loc, one, strideEntryPtr);
+      // Unless the operand is a scalar pointer, also fill shape and strides.
+      if (!shape.dimensions().empty()) {
+        auto entry_type =
+            struct_type.getStructElementType(3).getArrayElementType();
+        // TODO(b/137624192) Pass in the descriptor to allow for dynamic shapes.
+        assert(shape.IsArray() && shape.is_static());
+        for (auto extent : llvm::enumerate(shape.dimensions())) {
+          auto index = builder.create<mlir::LLVM::ConstantOp>(
+              loc, offset_type, builder.getI64IntegerAttr(extent.index()));
+          auto shapeEntryPtr = builder.create<mlir::LLVM::GEPOp>(
+              loc, entry_type, descPtr,
+              llvm::ArrayRef<Value*>{zero, shapeIndex, index});
+          auto extentValue = builder.create<mlir::LLVM::ConstantOp>(
+              loc, entry_type, builder.getI64IntegerAttr(extent.value()));
+          builder.create<mlir::LLVM::StoreOp>(loc, extentValue, shapeEntryPtr);
+        }
+        // Finally, fill the strides.
+        // TODO(b/137624192): Take assigned layout into account.
+        entry_type = struct_type.getStructElementType(4).getArrayElementType();
+        Value* accumulator = nullptr;
+        for (int64 idx = shape.rank() - 1; idx >= 0; --idx) {
+          auto indexValue = builder.create<mlir::LLVM::ConstantOp>(
+              loc, offset_type, builder.getI64IntegerAttr(idx));
+          auto strideEntryPtr = builder.create<mlir::LLVM::GEPOp>(
+              loc, entry_type, descPtr,
+              llvm::ArrayRef<Value*>{zero, strideIndex, indexValue});
+          if (accumulator) {
+            auto strideValue = builder.create<mlir::LLVM::ConstantOp>(
+                loc, entry_type,
+                builder.getI64IntegerAttr(shape.dimensions(idx + 1)));
+            accumulator = builder.create<mlir::LLVM::MulOp>(
+                loc, entry_type, accumulator, strideValue);
+          } else {
+            accumulator = one;
+          }
+          builder.create<mlir::LLVM::StoreOp>(loc, accumulator, strideEntryPtr);
+        }
       }
       // Now we can use the descriptor instead of the original argument.
       value->replaceAllUsesWith(descPtr);
@@ -518,6 +524,10 @@ StatusOr<std::unique_ptr<Executable>> MlirCompiler::RunBackend(
       module_hook_.invoke(IRHook::LoweringStage::KERNEL, *kernel_module));
 
   auto llvmModule = mlir::translateModuleToNVVMIR(*kernel_module);
+
+  if (!llvmModule) {
+    return InternalError("Translation to LLVM failed");
+  }
 
   llvmModule->setModuleIdentifier(emission_context.getHloModule()->name());
   // TODO(herhut): Why is this needed and does not come from the template?

@@ -20,6 +20,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Module.h"
 #include "mlir/IR/OpImplementation.h"
@@ -39,10 +40,10 @@ FuncOp FuncOp::create(Location location, StringRef name, FunctionType type,
   OperationState state(location, "func");
   Builder builder(location->getContext());
   FuncOp::build(&builder, state, name, type, attrs);
-  return llvm::cast<FuncOp>(Operation::create(state));
+  return cast<FuncOp>(Operation::create(state));
 }
 FuncOp FuncOp::create(Location location, StringRef name, FunctionType type,
-                      llvm::iterator_range<dialect_attr_iterator> attrs) {
+                      iterator_range<dialect_attr_iterator> attrs) {
   SmallVector<NamedAttribute, 8> attrRef(attrs);
   return create(location, name, type, llvm::makeArrayRef(attrRef));
 }
@@ -203,7 +204,7 @@ FuncOp FuncOp::clone(BlockAndValueMapping &mapper) {
   }
 
   // Create the new function.
-  FuncOp newFunc = llvm::cast<FuncOp>(getOperation()->cloneWithoutRegions());
+  FuncOp newFunc = cast<FuncOp>(getOperation()->cloneWithoutRegions());
   newFunc.setType(newType);
 
   /// Set the argument attributes for arguments that aren't being replaced.

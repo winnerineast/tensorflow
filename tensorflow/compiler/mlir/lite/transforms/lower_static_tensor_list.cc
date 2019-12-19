@@ -71,9 +71,7 @@ class TensorListPatternRewriter : public PatternRewriter {
   explicit TensorListPatternRewriter(FuncOp fn)
       : PatternRewriter(fn.getContext()) {}
 
-  Operation *createOperation(const OperationState &state) override {
-    return OpBuilder::createOperation(state);
-  }
+  Operation *insert(Operation *op) override { return OpBuilder::insert(op); }
 };
 
 /// Lower TensorList ops in functions for subsequent legalization.
@@ -299,9 +297,9 @@ struct ConvertTensorListInitOp : public ConversionPattern {
         new_element_shape_values.push_back(dim_value);
       }
 
-      auto attr = DenseIntElementsAttr::get<int32_t>(
-          element_shape->getType().cast<ShapedType>(),
-          new_element_shape_values);
+      auto attr =
+          DenseIntElementsAttr::get(element_shape->getType().cast<ShapedType>(),
+                                    new_element_shape_values);
       auto new_element_shape = rewriter.create<ConstantOp>(
           op.getLoc(), element_shape->getType(), attr);
       element_shape = new_element_shape;
@@ -484,9 +482,9 @@ struct ConvertTensorListResize : public ConversionPattern {
                           &rewriter);
 
     // Inserts the two blocks' names into the symbol table held by the module.
-    // Using ModuleManager will ensure that the inserted symbol names are
+    // Using SymbolTable will ensure that the inserted symbol names are
     // unique.
-    ModuleManager manager(resize_op.getParentOfType<ModuleOp>());
+    SymbolTable manager(resize_op.getParentOfType<ModuleOp>());
     manager.insert(then_branch_op);
     manager.insert(else_branch_op);
 
@@ -533,7 +531,7 @@ struct ConvertTensorListResize : public ConversionPattern {
     // `TensorListStackOp` and `ConcatOp`, since the first dimension of the
     // shape specified by `result_type` is -1.
     auto stacked_extended_part = rewriter->create<TF::TensorListStackOp>(
-        loc, ArrayRef<Type>({result_type}), extended_part,
+        loc, result_type, extended_part,
         /*element_shape=*/CreateI32SplatConst(loc, rewriter, {}, -1),
         /*num_elements=*/rewriter->getI32IntegerAttr(-1));
     auto concat_op = rewriter->create<TF::ConcatOp>(
@@ -754,8 +752,7 @@ struct ConvertWhile : public ConversionPattern {
     cloned.removeAttr("T");
     UpdateFunctionTypes(cloned);
 
-    SmallVector<Value *, 8> results(cloned.getResults());
-    rewriter.replaceOp(op, results);
+    rewriter.replaceOp(op, cloned.getResults());
     return matchSuccess();
   }
 };

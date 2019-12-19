@@ -26,6 +26,7 @@ import numpy as np
 from tensorflow.python import keras
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors_impl
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.keras.utils import generic_utils
@@ -328,8 +329,9 @@ class MeanSquaredErrorTest(test.TestCase):
     y_true = constant_op.constant([1, 9, 2, -5, -2, 6], shape=(2, 3, 1))
     y_pred = constant_op.constant([4, 8, 12, 8, 1, 3], shape=(2, 3, 1))
     sample_weight = constant_op.constant([3, 6, 5, 0], shape=(2, 2))
-    with self.assertRaisesRegexp(ValueError,
-                                 'weights can not be broadcast to values'):
+    with self.assertRaisesRegexp((ValueError, errors_impl.InvalidArgumentError),
+                                 (r'Incompatible shapes: \[2,3\] vs. \[2,2\]|'
+                                  'Dimensions must be equal')):
       mse_obj(y_true, y_pred, sample_weight=sample_weight)
 
   def test_no_reduction(self):
@@ -421,8 +423,9 @@ class MeanAbsoluteErrorTest(test.TestCase):
     y_true = constant_op.constant([1, 9, 2, -5, -2, 6], shape=(2, 3, 1))
     y_pred = constant_op.constant([4, 8, 12, 8, 1, 3], shape=(2, 3, 1))
     sample_weight = constant_op.constant([3, 6, 5, 0], shape=(2, 2))
-    with self.assertRaisesRegexp(ValueError,
-                                 'weights can not be broadcast to values'):
+    with self.assertRaisesRegexp((ValueError, errors_impl.InvalidArgumentError),
+                                 (r'Incompatible shapes: \[2,3\] vs. \[2,2\]|'
+                                  'Dimensions must be equal')):
       mae_obj(y_true, y_pred, sample_weight=sample_weight)
 
   def test_no_reduction(self):
@@ -1002,6 +1005,14 @@ class SparseCategoricalCrossentropyTest(test.TestCase):
         from_logits=True, reduction=losses_utils.ReductionV2.NONE)
     loss = cce_obj(y_true, logits)
     self.assertAllClose((0.001822, 0.000459, 0.169846), self.evaluate(loss), 3)
+
+  def test_non_tensor(self):
+    # Test case for GitHub issue 33394.
+    cce_obj = keras.losses.SparseCategoricalCrossentropy()
+    y_true = [[0], [1], [2]]
+    y_pred = [[.9, .05, .05], [.5, .89, .6], [.05, .01, .94]]
+    loss = cce_obj(y_true, y_pred, sample_weight=2.3)
+    self.assertAlmostEqual(self.evaluate(loss), .7449, 3)
 
 
 @test_util.run_all_in_graph_and_eager_modes

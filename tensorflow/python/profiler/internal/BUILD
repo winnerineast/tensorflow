@@ -1,6 +1,6 @@
 load("//tensorflow:tensorflow.bzl", "cuda_py_test")
 load("//tensorflow:tensorflow.bzl", "pybind_extension")
-load("//tensorflow:tensorflow.bzl", "py_test", "tf_binary_additional_srcs")
+load("//tensorflow:tensorflow.bzl", "py_test", "tf_binary_additional_data_deps", "tf_binary_additional_srcs")
 
 package(
     default_visibility = ["//tensorflow/python/profiler:__subpackages__"],
@@ -40,7 +40,7 @@ py_library(
 py_test(
     name = "print_model_analysis_test",
     srcs = ["print_model_analysis_test.py"],
-    python_version = "PY2",
+    python_version = "PY3",
     srcs_version = "PY2AND3",
     deps = [
         "//tensorflow/core/profiler:protos_all_py",
@@ -58,32 +58,36 @@ py_test(
 cuda_py_test(
     name = "run_metadata_test",
     srcs = ["run_metadata_test.py"],
-    additional_deps = [
-        ":model_analyzer_testlib",
-        "//tensorflow/core/profiler:protos_all_py",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python/profiler:model_analyzer",
-        "//tensorflow/python:random_ops",
-    ],
+    python_version = "PY3",
     tags = [
         "no_gpu",  # b/138442728
         "no_pip",
     ],
     xla_enable_strict_auto_jit = False,  # Node names are different with autojit
+    deps = [
+        ":model_analyzer_testlib",
+        "//tensorflow/core/profiler:protos_all_py",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:math_ops",
+        "//tensorflow/python:random_ops",
+        "//tensorflow/python/profiler:model_analyzer",
+    ],
 )
 
 pybind_extension(
     name = "_pywrap_traceme",
     srcs = ["traceme_wrapper.cc"] + tf_binary_additional_srcs(),
+    data = tf_binary_additional_data_deps(),
     module_name = "_pywrap_traceme",
     visibility = [
         "//perftools/accelerators/xprof/xprofilez/integration_tests:__pkg__",
         "//tensorflow/python/profiler:__subpackages__",
     ],
     deps = [
-        "//tensorflow/core/profiler/internal:python_traceme",
+        "//tensorflow/core:lib",
+        "//tensorflow/core/profiler/lib:traceme",
+        "@com_google_absl//absl/types:optional",
         "@pybind11",
     ],
 )
@@ -91,9 +95,12 @@ pybind_extension(
 pybind_extension(
     name = "_pywrap_scoped_annotation",
     srcs = ["scoped_annotation_wrapper.cc"] + tf_binary_additional_srcs(),
+    data = tf_binary_additional_data_deps(),
     module_name = "_pywrap_scoped_annotation",
     deps = [
-        "//tensorflow/core/profiler/internal:python_scoped_annotation",
+        "//tensorflow/core:lib",
+        "//tensorflow/core/profiler/lib:scoped_annotation",
+        "@com_google_absl//absl/types:optional",
         "@pybind11",
     ],
 )

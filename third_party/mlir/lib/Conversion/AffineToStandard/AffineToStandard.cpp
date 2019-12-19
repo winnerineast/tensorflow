@@ -97,7 +97,7 @@ public:
     Value *remainder = builder.create<RemISOp>(loc, lhs, rhs);
     Value *zeroCst = builder.create<ConstantIndexOp>(loc, 0);
     Value *isRemainderNegative =
-        builder.create<CmpIOp>(loc, CmpIPredicate::SLT, remainder, zeroCst);
+        builder.create<CmpIOp>(loc, CmpIPredicate::slt, remainder, zeroCst);
     Value *correctedRemainder = builder.create<AddIOp>(loc, remainder, rhs);
     Value *result = builder.create<SelectOp>(loc, isRemainderNegative,
                                              correctedRemainder, remainder);
@@ -134,7 +134,7 @@ public:
     Value *zeroCst = builder.create<ConstantIndexOp>(loc, 0);
     Value *noneCst = builder.create<ConstantIndexOp>(loc, -1);
     Value *negative =
-        builder.create<CmpIOp>(loc, CmpIPredicate::SLT, lhs, zeroCst);
+        builder.create<CmpIOp>(loc, CmpIPredicate::slt, lhs, zeroCst);
     Value *negatedDecremented = builder.create<SubIOp>(loc, noneCst, lhs);
     Value *dividend =
         builder.create<SelectOp>(loc, negative, negatedDecremented, lhs);
@@ -173,7 +173,7 @@ public:
     Value *zeroCst = builder.create<ConstantIndexOp>(loc, 0);
     Value *oneCst = builder.create<ConstantIndexOp>(loc, 1);
     Value *nonPositive =
-        builder.create<CmpIOp>(loc, CmpIPredicate::SLE, lhs, zeroCst);
+        builder.create<CmpIOp>(loc, CmpIPredicate::sle, lhs, zeroCst);
     Value *negated = builder.create<SubIOp>(loc, zeroCst, lhs);
     Value *decremented = builder.create<SubIOp>(loc, lhs, oneCst);
     Value *dividend =
@@ -277,7 +277,7 @@ Value *mlir::lowerAffineLowerBound(AffineForOp op, OpBuilder &builder) {
                                   boundOperands);
   if (!lbValues)
     return nullptr;
-  return buildMinMaxReductionSeq(op.getLoc(), CmpIPredicate::SGT, *lbValues,
+  return buildMinMaxReductionSeq(op.getLoc(), CmpIPredicate::sgt, *lbValues,
                                  builder);
 }
 
@@ -290,7 +290,7 @@ Value *mlir::lowerAffineUpperBound(AffineForOp op, OpBuilder &builder) {
                                   boundOperands);
   if (!ubValues)
     return nullptr;
-  return buildMinMaxReductionSeq(op.getLoc(), CmpIPredicate::SLT, *ubValues,
+  return buildMinMaxReductionSeq(op.getLoc(), CmpIPredicate::slt, *ubValues,
                                  builder);
 }
 
@@ -352,7 +352,7 @@ public:
                                           operandsRef.drop_front(numDims));
       if (!affResult)
         return matchFailure();
-      auto pred = isEquality ? CmpIPredicate::EQ : CmpIPredicate::SGE;
+      auto pred = isEquality ? CmpIPredicate::eq : CmpIPredicate::sge;
       Value *cmpVal =
           rewriter.create<CmpIOp>(loc, pred, affResult, zeroConstant);
       cond =
@@ -405,13 +405,37 @@ public:
                                      PatternRewriter &rewriter) const override {
     // Expand affine map from 'affineLoadOp'.
     SmallVector<Value *, 8> indices(op.getMapOperands());
-    auto maybeExpandedMap =
+    auto resultOperands =
         expandAffineMap(rewriter, op.getLoc(), op.getAffineMap(), indices);
-    if (!maybeExpandedMap)
+    if (!resultOperands)
       return matchFailure();
 
     // Build std.load memref[expandedMap.results].
-    rewriter.replaceOpWithNewOp<LoadOp>(op, op.getMemRef(), *maybeExpandedMap);
+    rewriter.replaceOpWithNewOp<LoadOp>(op, op.getMemRef(), *resultOperands);
+    return matchSuccess();
+  }
+};
+
+// Apply the affine map from an 'affine.prefetch' operation to its operands, and
+// feed the results to a newly created 'std.prefetch' operation (which replaces
+// the original 'affine.prefetch').
+class AffinePrefetchLowering : public OpRewritePattern<AffinePrefetchOp> {
+public:
+  using OpRewritePattern<AffinePrefetchOp>::OpRewritePattern;
+
+  PatternMatchResult matchAndRewrite(AffinePrefetchOp op,
+                                     PatternRewriter &rewriter) const override {
+    // Expand affine map from 'affinePrefetchOp'.
+    SmallVector<Value *, 8> indices(op.getMapOperands());
+    auto resultOperands =
+        expandAffineMap(rewriter, op.getLoc(), op.getAffineMap(), indices);
+    if (!resultOperands)
+      return matchFailure();
+
+    // Build std.prefetch memref[expandedMap.results].
+    rewriter.replaceOpWithNewOp<PrefetchOp>(
+        op, op.memref(), *resultOperands, op.isWrite(),
+        op.localityHint().getZExtValue(), op.isDataCache());
     return matchSuccess();
   }
 };
@@ -506,11 +530,10 @@ public:
 
 void mlir::populateAffineToStdConversionPatterns(
     OwningRewritePatternList &patterns, MLIRContext *ctx) {
-  patterns
-      .insert<AffineApplyLowering, AffineDmaStartLowering,
-              AffineDmaWaitLowering, AffineLoadLowering, AffineStoreLowering,
-              AffineForLowering, AffineIfLowering, AffineTerminatorLowering>(
-          ctx);
+  patterns.insert<
+      AffineApplyLowering, AffineDmaStartLowering, AffineDmaWaitLowering,
+      AffineLoadLowering, AffinePrefetchLowering, AffineStoreLowering,
+      AffineForLowering, AffineIfLowering, AffineTerminatorLowering>(ctx);
 }
 
 namespace {

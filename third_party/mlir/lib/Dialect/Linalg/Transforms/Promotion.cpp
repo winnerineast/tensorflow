@@ -55,11 +55,6 @@ static llvm::cl::opt<bool> clPromoteDynamic(
     llvm::cl::desc("Test generation of dynamic promoted buffers"),
     llvm::cl::cat(clOptionsCategory), llvm::cl::init(false));
 
-static AffineMap getAffineDifferenceMap(MLIRContext *context) {
-  AffineExpr d0(getAffineDimExpr(0, context)), d1(getAffineDimExpr(1, context));
-  return AffineMap::get(2, 0, {d0 - d1});
-}
-
 static Value *allocBuffer(Type elementType, Value *size, bool dynamicBuffers) {
   auto *ctx = size->getContext();
   auto width = llvm::divideCeil(elementType.getIntOrFloatBitWidth(), 8);
@@ -165,11 +160,11 @@ mlir::linalg::promoteSubViews(OpBuilder &b, Location loc,
   return res;
 }
 
-static void promoteSubViewOperands(LinalgOp op, SetVector<Value *> subViews,
-                                   bool dynamicBuffers,
-                                   OperationFolder *folder) {
+LinalgOp mlir::linalg::promoteSubViewOperands(OpBuilder &b, LinalgOp op,
+                                              SetVector<Value *> subViews,
+                                              bool dynamicBuffers,
+                                              OperationFolder *folder) {
   // 1. Promote the specified views and use them in the new op.
-  OpBuilder b(op);
   ScopedContext scope(b, op.getLoc());
   auto promotedBufferAndViews = promoteSubViews(
       b, op.getLoc(), subViews.getArrayRef(), dynamicBuffers, folder);
@@ -194,11 +189,12 @@ static void promoteSubViewOperands(LinalgOp op, SetVector<Value *> subViews,
   // extra scalars etc.
   auto operands = getAssumedNonViewOperands(op);
   opViews.append(operands.begin(), operands.end());
-  op.clone(b, op.getLoc(), opViews);
+  LinalgOp res = op.clone(b, op.getLoc(), opViews);
 
   // 3. Emit write-back for the promoted output views: copy the partial view.
   for (auto viewAndPartialLocalView : writebackViews) {
-    // Note: use the old op to determine whether the operand view is an output.
+    // WARNING: MUST use the old op to determine whether the operand view is an
+    // output.
     bool isOutput =
         op.getIndexOfOutput(viewAndPartialLocalView.first).hasValue();
     if (isOutput)
@@ -208,6 +204,8 @@ static void promoteSubViewOperands(LinalgOp op, SetVector<Value *> subViews,
   // 4. Dealloc local buffers.
   for (const auto &pi : promotedBufferAndViews)
     dealloc(pi.buffer);
+
+  return res;
 }
 
 static void promoteSubViews(FuncOp f, bool dynamicBuffers) {
@@ -217,11 +215,12 @@ static void promoteSubViews(FuncOp f, bool dynamicBuffers) {
     // TODO(ntv) some heuristic here to decide what to promote. Atm it is all or
     // nothing.
     SetVector<Value *> subViews;
+    OpBuilder b(op);
     for (auto it : op.getInputsAndOutputs())
       if (auto sv = dyn_cast_or_null<SubViewOp>(it->getDefiningOp()))
         subViews.insert(sv);
     if (!subViews.empty()) {
-      promoteSubViewOperands(op, subViews, dynamicBuffers, &folder);
+      promoteSubViewOperands(b, op, subViews, dynamicBuffers, &folder);
       toErase.push_back(op);
     }
   });

@@ -33,8 +33,6 @@ limitations under the License.
 #include "mlir/Pass/Pass.h"  // TF:local_config_mlir
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_device.h"
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_executor.h"
-#include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace mlir {
 namespace TFDevice {
@@ -66,8 +64,8 @@ llvm::SmallVector<tf_executor::IslandOp, 8> ExpandReplicateIntoReplicas(
 
   // Replace replicate terminator with YieldOp.
   builder->setInsertionPoint(&terminator);
-  builder->create<tf_executor::YieldOp>(
-      terminator.getLoc(), llvm::to_vector<8>(terminator.getOperands()));
+  builder->create<tf_executor::YieldOp>(terminator.getLoc(),
+                                        terminator.getOperands());
   terminator.erase();
 
   builder->setInsertionPoint(island_op);
@@ -173,7 +171,7 @@ void CreateIslandsFromReplicate(const Dialect* tf_dialect,
   builder.setInsertionPoint(island_op);
   auto island_sink = builder.create<tf_executor::IslandOp>(
       island_op.getLoc(), llvm::to_vector<8>(island_op.getResultTypes()),
-      island_operands);
+      island_operands, llvm::ArrayRef<NamedAttribute>{});
   island_sink.body().push_back(new Block);
 
   // Move replicate island YieldOp over to new single island.
@@ -198,10 +196,6 @@ void LowerSingleIslandReplicateToIslands(const Dialect* tf_dialect,
 }
 
 void ReplicateToIslandPass::runOnFunction() {
-  if (VLOG_IS_ON(1))
-    tensorflow::DumpMlirOpToFile(
-        "mlir_device_replicate_to_executor_island_before", getFunction());
-
   const Dialect* tf_dialect = getContext().getRegisteredDialect("tf");
   if (!tf_dialect) {
     signalPassFailure();
@@ -211,10 +205,6 @@ void ReplicateToIslandPass::runOnFunction() {
   getFunction().walk([&](tf_executor::IslandOp island_op) {
     LowerSingleIslandReplicateToIslands(tf_dialect, island_op);
   });
-
-  if (VLOG_IS_ON(1))
-    tensorflow::DumpMlirOpToFile(
-        "mlir_device_replicate_to_executor_island_after", getFunction());
 }
 }  // anonymous namespace
 
